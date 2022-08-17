@@ -72,6 +72,11 @@ if (PROJECT STREQUAL "CCPP-FV3")
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
       $<INSTALL_INTERFACE:include>
   )
+elseif (PROJECT STREQUAL "CCPP-NEPTUNE")
+  target_include_directories(ccpp PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+      $<INSTALL_INTERFACE:include>
+  )
 elseif (PROJECT STREQUAL "CCPP-SCM")
   target_include_directories(ccpp PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -96,6 +101,8 @@ install(EXPORT ccpp-targets
 # Define where to install the Fortran modules
 if (PROJECT STREQUAL "CCPP-FV3")
   install(FILES ${MODULES_F90} DESTINATION include)
-else (PROJECT STREQUAL "CCPP-SCM")
+elseif (PROJECT STREQUAL "CCPP-NEPTUNE")
+  install(FILES ${MODULES_F90} DESTINATION include)
+elseif (PROJECT STREQUAL "CCPP-SCM")
   install(FILES ${MODULES_F90} DESTINATION include/${PROJECT_NAME})
 endif (PROJECT STREQUAL "CCPP-FV3")
