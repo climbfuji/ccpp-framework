@@ -32,6 +32,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--config',     action='store', help='path to CCPP prebuild configuration file', required=True)
 parser.add_argument('--clean',      action='store_true', help='remove files created by this script, then exit', default=False)
 parser.add_argument('--debug',      action='store_true', help='enable debugging output', default=False)
+parser.add_argument('--verbose',    action='store_true', help='enable verbose output', default=False)
 parser.add_argument('--suites',     action='store', help='suite definition files to use (comma-separated, without path)', default='')
 parser.add_argument('--builddir',   action='store', help='relative path to CCPP build directory', required=False, default=None)
 
@@ -49,12 +50,13 @@ def parse_arguments():
     configfile = args.config
     clean = args.clean
     debug = args.debug
+    verbose = args.verbose
     if args.suites:
         sdfs = ['suite_{0}.xml'.format(x) for x in args.suites.split(',')]
     else:
         sdfs = None
     builddir = args.builddir
-    return (success, configfile, clean, debug, sdfs, builddir)
+    return (success, configfile, clean, debug, verbose, sdfs, builddir)
 
 def import_config(configfile, builddir):
     """Import the configuration from a given configuration file"""
@@ -115,18 +117,24 @@ def import_config(configfile, builddir):
 
     return(success, config)
 
-def setup_logging(debug):
+def setup_logging(debug,verbose):
     """Sets up the logging module and logging level."""
     success = True
     if debug:
         level = logging.DEBUG
     else:
-        level = logging.INFO
+        if verbose:
+            level = logging.INFO
+        else:
+            level = logging.ERROR
     logging.basicConfig(format='%(levelname)s: %(message)s', level=level)
     if debug:
         logging.info('Logging level set to DEBUG')
     else:
-        logging.info('Logging level set to INFO')
+        if verbose:
+            logging.info('Logging level set to INFO')
+        else:
+            logging.info('Logging level set to ERROR')
     return success
 
 def clean_files(config):
@@ -738,11 +746,11 @@ def generate_caps_makefile(caps, caps_makefile, caps_cmakefile, caps_sourcefile,
 def main():
     """Main routine that handles the CCPP prebuild for different host models."""
     # Parse command line arguments
-    (success, configfile, clean, debug, sdfs, builddir) = parse_arguments()
+    (success, configfile, clean, debug, verbose, sdfs, builddir) = parse_arguments()
     if not success:
         raise Exception('Call to parse_arguments failed.')
 
-    success = setup_logging(debug)
+    success = setup_logging(debug,verbose)
     if not success:
         raise Exception('Call to setup_logging failed.')
 
