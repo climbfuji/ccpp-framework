@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Script to generate a cap module and subroutines
 # from a scheme xml file.
@@ -12,7 +12,6 @@ import sys
 import getopt
 import xml.etree.ElementTree as ET
 
-from common import CCPP_ERROR_FLAG_VARIABLE
 from common import CCPP_INTERNAL_VARIABLES
 from common import STANDARD_VARIABLE_TYPES, STANDARD_CHARACTER_TYPE
 from common import isstring, string_to_python_identifier
@@ -32,7 +31,6 @@ class Var(object):
         self._container     = None
         self._kind          = None
         self._intent        = None
-        self._optional      = None
         self._active        = None
         self._target        = None
         self._actions       = { 'in' : None, 'out' : None }
@@ -122,17 +120,6 @@ class Var(object):
         if not value in ['none', 'in', 'out', 'inout']:
             raise ValueError('Invalid value {0} for variable property intent'.format(value))
         self._intent = value
-
-    @property
-    def optional(self):
-        '''Get the optional attribute of the variable.'''
-        return self._optional
-
-    @optional.setter
-    def optional(self, value):
-        if not value in ['T', 'F']:
-            raise ValueError('Invalid value {0} for variable property optional'.format(value))
-        self._optional = value
 
     @property
     def active(self):
@@ -281,7 +268,6 @@ class Var(object):
         rank          = {s.rank} *
         kind          = {s.kind} *
         intent        = {s.intent}
-        optional      = {s.optional}
         active        = {s.active}
         target        = {s.target}
         container     = {s.container}

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 from collections import OrderedDict
 import keyword
@@ -19,9 +19,11 @@ CCPP_STAGES['init']              = 'init'
 CCPP_STAGES['run']               = 'run'
 CCPP_STAGES['finalize']          = 'final'
 
-CCPP_ERROR_FLAG_VARIABLE = 'ccpp_error_flag'
+CCPP_CONSTANT_ONE        = 'ccpp_constant_one'
+CCPP_ERROR_CODE_VARIABLE = 'ccpp_error_code'
 CCPP_ERROR_MSG_VARIABLE  = 'ccpp_error_message'
 CCPP_LOOP_COUNTER        = 'ccpp_loop_counter'
+CCPP_LOOP_EXTENT         = 'ccpp_loop_extent'
 CCPP_BLOCK_NUMBER        = 'ccpp_block_number'
 CCPP_BLOCK_COUNT         = 'ccpp_block_count'
 CCPP_BLOCK_SIZES         = 'ccpp_block_sizes'
@@ -48,7 +50,7 @@ CCPP_INTERNAL_VARIABLE_DEFINITON_FILE = os.path.join(SRCDIR, 'ccpp_types.F90')
 
 # List of internal variables provided by the CCPP
 CCPP_INTERNAL_VARIABLES = {
-    CCPP_ERROR_FLAG_VARIABLE : 'cdata%errflg',
+    CCPP_ERROR_CODE_VARIABLE : 'cdata%errflg',
     CCPP_ERROR_MSG_VARIABLE  : 'cdata%errmsg',
     CCPP_LOOP_COUNTER        : 'cdata%loop_cnt',
     CCPP_BLOCK_NUMBER        : 'cdata%blk_no',
