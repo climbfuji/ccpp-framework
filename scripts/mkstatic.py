@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 
 import collections
@@ -14,18 +14,45 @@ import xml.etree.ElementTree as ET
 
 from common import encode_container
 from common import CCPP_STAGES
-from common import CCPP_ERROR_FLAG_VARIABLE, CCPP_ERROR_MSG_VARIABLE, CCPP_LOOP_COUNTER
-from common import CCPP_BLOCK_NUMBER, CCPP_BLOCK_COUNT, CCPP_BLOCK_SIZES, CCPP_INTERNAL_VARIABLES
-from common import CCPP_HORIZONTAL_DIMENSION, CCPP_HORIZONTAL_LOOP_EXTENT
+from common import CCPP_ERROR_CODE_VARIABLE, CCPP_ERROR_MSG_VARIABLE, CCPP_LOOP_COUNTER, CCPP_LOOP_EXTENT
+from common import CCPP_BLOCK_NUMBER, CCPP_BLOCK_COUNT, CCPP_BLOCK_SIZES, CCPP_THREAD_NUMBER, CCPP_INTERNAL_VARIABLES
+from common import CCPP_CONSTANT_ONE, CCPP_HORIZONTAL_DIMENSION, CCPP_HORIZONTAL_LOOP_EXTENT
 from common import FORTRAN_CONDITIONAL_REGEX_WORDS, FORTRAN_CONDITIONAL_REGEX
 from common import CCPP_TYPE, STANDARD_VARIABLE_TYPES, STANDARD_CHARACTER_TYPE
 from common import CCPP_STATIC_API_MODULE, CCPP_STATIC_SUBROUTINE_NAME
+from metadata_parser import CCPP_MANDATORY_VARIABLES
 from mkcap import Var
 
 ###############################################################################
 
 # Maximum number of dimensions of an array allowed by the Fortran 2008 standard
 FORTRAN_ARRAY_MAX_DIMS = 15
+
+# These variables always need to be present for creating suite and group caps
+CCPP_SUITE_VARIABLES = { **CCPP_MANDATORY_VARIABLES,
+    CCPP_LOOP_COUNTER : Var(local_name    = 'loop_cnt',
+                            standard_name = CCPP_LOOP_COUNTER,
+                            long_name     = 'loop counter for subcycling loops in CCPP',
+                            units         = 'index',
+                            type          = 'integer',
+                            dimensions    = [],
+                            rank          = '',
+                            kind          = '',
+                            intent        = 'in',
+                            active        = 'T',
+                            ),
+    CCPP_LOOP_EXTENT : Var(local_name    = 'loop_max',
+                           standard_name = CCPP_LOOP_EXTENT,
+                           long_name     = 'loop counter for subcycling loops in CCPP',
+                           units         = 'count',
+                           type          = 'integer',
+                           dimensions    = [],
+                           rank          = '',
+                           kind          = '',
+                           intent        = 'in',
+                           active        = 'T',
+                           ),
+    }
 
 ###############################################################################
 
@@ -252,6 +279,10 @@ end module {module}
         '''Get the module name of the API.'''
         return self._module
 
+    @module.setter
+    def module(self, value):
+        self._module = value
+
     @property
     def subroutines(self):
         '''Get the subroutines names of the API to.'''
@@ -406,7 +437,7 @@ end module {module}
                 self.update_api = True
         return
 
-    def write_sourcefile(self, source_filename):
+    def write_includefile(self, source_filename, type):
         success = True
         filepath = os.path.split(source_filename)[0]
         if filepath and not os.path.isdir(filepath):
@@ -422,14 +453,30 @@ end module {module}
         else:
             write_to_test_file = False
             f = open(source_filename, 'w')
-        # Contents of shell/source file
-        contents = """# The CCPP static API is defined here.
+
+        if type == 'shell':
+            # Contents of shell/source file
+            contents = """# The CCPP static API is defined here.
 #
 # This file is auto-generated using ccpp_prebuild.py
 # at compile time, do not edit manually.
 #
 export CCPP_STATIC_API=\"{filename}\"
 """.format(filename=os.path.abspath(os.path.join(self.directory,self.filename)))
+        elif type == 'cmake':
+            # Contents of cmake include file
+            contents = """# The CCPP static API is defined here.
+#
+# This file is auto-generated using ccpp_prebuild.py
+# at compile time, do not edit manually.
+#
+set(API \"{filename}\")
+""".format(filename=os.path.abspath(os.path.join(self.directory,self.filename)))
+        else:
+            logging.error('Encountered unknown type of file "{type}" when writing include file for static API'.format(type=type))
+            success = False
+            return
+
         f.write(contents)
         f.close()
         # See comment above on updating the API or not
@@ -504,6 +551,7 @@ end module {module}
         self._sdf_name = None
         self._all_schemes_called = None
         self._all_subroutines_called = None
+        self._call_tree = {}
         self._caps = None
         self._module = None
         self._subroutines = None
@@ -545,7 +593,7 @@ end module {module}
     def update_cap(self, value):
         self._update_cap = value
 
-    def parse(self):
+    def parse(self, make_call_tree=False):
         '''Parse the suite definition file.'''
         success = True
 
@@ -568,11 +616,17 @@ end module {module}
         self._all_schemes_called = []
         self._all_subroutines_called = []
 
+        if make_call_tree:
+            # Call tree of all schemes in SDF. call_tree is a dictionary, with keys corresponding to each group in a suite, and
+            # the value associated with each key being an ordered list of the schemes in each group (with duplicates and subcycles)
+            self._call_tree = {}
+
         # Build hierarchical structure as in SDF
         self._groups = []
         for group_xml in suite_xml:
             subcycles = []
 
+            self._call_tree[group_xml.attrib['name']] = []
             # Add suite-wide init scheme to group 'init', similar for finalize
             if group_xml.tag.lower() == 'init' or group_xml.tag.lower() == 'finalize':
                 self._all_schemes_called.append(group_xml.text)
@@ -594,13 +648,21 @@ end module {module}
                     loop=int(subcycle_xml.get('loop'))
                     for ccpp_stage in CCPP_STAGES:
                         self._all_subroutines_called.append(scheme_xml.text + '_' + CCPP_STAGES[ccpp_stage])
+
                 subcycles.append(Subcycle(loop=loop, schemes=schemes))
+
+                if make_call_tree:
+                    # Populate call tree from SDF's heirarchical structure, including multiple calls in subcycle loops
+                    for loop in range(0,int(subcycle_xml.get('loop'))):
+                        for scheme_xml in subcycle_xml:
+                            self._call_tree[group_xml.attrib['name']].append(scheme_xml.text)
 
             self._groups.append(Group(name=group_xml.get('name'), subcycles=subcycles, suite=self._name))
 
         # Remove duplicates from list of all subroutines an schemes
         self._all_schemes_called = list(set(self._all_schemes_called))
         self._all_subroutines_called = list(set(self._all_subroutines_called))
+
 
         return success
 
@@ -617,6 +679,11 @@ end module {module}
     def all_schemes_called(self):
         '''Get the list of all schemes.'''
         return self._all_schemes_called
+
+    @property
+    def call_tree(self):
+        '''Get the call tree of the suite (all schemes, in order, with duplicates and loops).'''
+        return self._call_tree
 
     @property
     def all_subroutines_called(self):
@@ -661,9 +728,10 @@ end module {module}
     def arguments(self, value):
         self._arguments = value
 
-    def write(self, metadata_request, metadata_define, arguments):
+    def write(self, metadata_request, metadata_define, arguments, debug):
         """Create caps for all groups in the suite and for the entire suite
-        (calling the group caps one after another)"""
+        (calling the group caps one after another). Add additional code for
+        debugging if debug flag is True."""
         # Set name of module and filename of cap
         self._module = 'ccpp_{suite_name}_cap'.format(suite_name=self._name)
         self.filename = '{module_name}.F90'.format(module_name=self._module)
@@ -674,7 +742,7 @@ end module {module}
         # require adjusting the intent of the variables.
         module_use = ''
         for group in self._groups:
-            group.write(metadata_request, metadata_define, arguments)
+            group.write(metadata_request, metadata_define, arguments, debug)
             for subroutine in group.subroutines:
                 module_use += '   use {m}, only: {s}\n'.format(m=group.module, s=subroutine)
             for ccpp_stage in CCPP_STAGES.keys():
@@ -892,7 +960,10 @@ end module {module}
         for key, value in kwargs.items():
             setattr(self, "_"+key, value)
 
-    def write(self, metadata_request, metadata_define, arguments):
+    def write(self, metadata_request, metadata_define, arguments, debug):
+        """Create caps for all stages of this group. Add additional code for
+        debugging if debug flag is True."""
+
         # Create an inverse lookup table of local variable names defined (by the host model) and standard names
         standard_name_by_local_name_define = collections.OrderedDict()
         for standard_name in metadata_define.keys():
@@ -900,7 +971,8 @@ end module {module}
 
         # First get target names of standard CCPP variables for subcycling and error handling
         ccpp_loop_counter_target_name = metadata_request[CCPP_LOOP_COUNTER][0].target
-        ccpp_error_flag_target_name = metadata_request[CCPP_ERROR_FLAG_VARIABLE][0].target
+        ccpp_loop_extent_target_name = metadata_request[CCPP_LOOP_EXTENT][0].target
+        ccpp_error_code_target_name = metadata_request[CCPP_ERROR_CODE_VARIABLE][0].target
         ccpp_error_msg_target_name = metadata_request[CCPP_ERROR_MSG_VARIABLE][0].target
         #
         module_use = ''
@@ -930,10 +1002,8 @@ end module {module}
             conditionals = {}
             #
             for subcycle in self._subcycles:
-                if subcycle.loop > 1 and ccpp_stage == 'run':
-                    body += '''
-      associate(cnt => {loop_var_name})
-      do cnt=1,{loop_cnt}\n\n'''.format(loop_var_name=ccpp_loop_counter_target_name,loop_cnt=subcycle.loop)
+                subcycle_body = ''
+                # Call all schemes
                 for scheme_name in subcycle.schemes:
                     # actions_before and actions_after capture operations such
                     # as unit conversions, transformations that have to happen
@@ -964,11 +1034,15 @@ end module {module}
                         for dim_expression in var.dimensions:
                             dims = dim_expression.split(':')
                             for dim in dims:
+                                dim = dim.lower()
                                 try:
                                     dim = int(dim)
                                 except ValueError:
                                     if not dim in local_vars.keys() and \
                                             not dim in additional_variables_required + arguments[scheme_name][subroutine_name]:
+                                        if not dim in metadata_define.keys():
+                                            raise Exception('Dimension {}, required by variable {}, not defined in host model metadata'.format(
+                                                                                                                       dim, var_standard_name))
                                         logging.debug("Adding dimension {} for variable {}".format(dim, var_standard_name))
                                         additional_variables_required.append(dim)
 
@@ -1000,6 +1074,7 @@ end module {module}
                             # standard name in the list of known variables
                             items = FORTRAN_CONDITIONAL_REGEX.findall(var.active)
                             for item in items:
+                                item = item.lower()
                                 if item in FORTRAN_CONDITIONAL_REGEX_WORDS:
                                     conditional += item
                                 else:
@@ -1036,7 +1111,6 @@ end module {module}
                             # of host model variables and set necessary default values
                             var = copy.deepcopy(metadata_define[var_standard_name][0])
                             var.intent = 'in'
-                            var.optional = 'F'
 
                         if not var_standard_name in local_vars.keys():
                             # The full name of the variable as known to the host model
@@ -1133,13 +1207,78 @@ end module {module}
                         if not var_standard_name in arguments[scheme_name][subroutine_name]:
                             continue
 
+                        # To assist debugging efforts, check if arrays have the correct size (ignore scalars for now)
+                        assign_test = ''
+                        if debug:
+                            if ccpp_stage in ['init', 'timestep_init', 'timestep_finalize', 'finalize'] and \
+                                    CCPP_INTERNAL_VARIABLES[CCPP_BLOCK_NUMBER] in local_vars[var_standard_name]['name'] and \
+                                    '{}:{}'.format(CCPP_CONSTANT_ONE,CCPP_HORIZONTAL_DIMENSION) in var.dimensions:
+                                # We don't need extra tests for blocked arrays, because the de-blocking logic below
+                                # will catch any out of bound reads with the appropriate compiler flags. It naturally
+                                # deals with non-uniform block sizes etc.
+                                pass
+                            elif var.rank:
+                                array_size = []
+                                for dim in var.dimensions:
+                                    # This is not supported/implemented: tmpvar would have one dimension less
+                                    # than the original array, and the metadata requesting the variable would
+                                    # not pass the initial test that host model variables and scheme variables
+                                    # have the same rank.
+                                    if dim == CCPP_BLOCK_NUMBER:
+                                        raise Exception("{} cannot be part of the dimensions of variable {}".format(
+                                                                              CCPP_BLOCK_NUMBER, var_standard_name))
+                                    else:
+                                        # Handle dimensions like "A:B", "A:3", "-1:Z"
+                                        if ':' in dim:
+                                            dims = [ x.lower() for x in dim.split(':')]
+                                            try:
+                                                dim0 = int(dims[0])
+                                                dim0 = dims[0]
+                                            except ValueError:
+                                                if not dims[0].lower() in metadata_define.keys():
+                                                    raise Exception('Dimension {}, required by variable {}, not defined in host model metadata'.format(
+                                                                                                                   dims[0].lower(), var_standard_name))
+                                                dim0 = metadata_define[dims[0].lower()][0].local_name
+                                            try:
+                                                dim1 = int(dims[1])
+                                                dim1 = dims[1]
+                                            except ValueError:
+                                                if not dims[1].lower() in metadata_define.keys():
+                                                    raise Exception('Dimension {}, required by variable {}, not defined in host model metadata'.format(
+                                                                                                                   dims[1].lower(), var_standard_name))
+                                                dim1 = metadata_define[dims[1].lower()][0].local_name
+                                        # Single dimensions
+                                        else:
+                                            dim0 = 1
+                                            try:
+                                                dim1 = int(dim)
+                                                dim1 = dim
+                                            except ValueError:
+                                                if not dim.lower() in metadata_define.keys():
+                                                    raise Exception('Dimension {}, required by variable {}, not defined in host model metadata'.format(
+                                                                                                                       dim.lower(), var_standard_name))
+                                                dim1 = metadata_define[dim.lower()][0].local_name
+                                    array_size.append('({last}-{first}+1)'.format(last=dim1, first=dim0))
+                                var_size_expected  = '({})'.format('*'.join(array_size))
+                                assign_test = '''        ! Check if variable {var_name} is associated/allocated and has the correct size
+        if (size({var_name})/={var_size_expected}) then
+          write({ccpp_errmsg}, '(2(a,i8))') 'Detected size mismatch for variable {var_name} in group {group_name} before {subroutine_name}, expected ', &
+                                           {var_size_expected}, ' but got ', size({var_name})
+          ierr = 1
+          return
+        end if
+'''.format(var_name=local_vars[var_standard_name]['name'], var_size_expected=var_size_expected,
+           ccpp_errmsg=CCPP_INTERNAL_VARIABLES[CCPP_ERROR_MSG_VARIABLE], group_name = self.name,
+           subroutine_name=subroutine_name)
+                        # end if debug
+
                         # kind_string is used for automated unit conversions, i.e. foo_kind_phys
                         kind_string = '_' + local_vars[var_standard_name]['kind'] if local_vars[var_standard_name]['kind'] else ''
 
                         # Convert blocked data in init and finalize steps - only required for variables with block number and horizontal_dimension
                         if ccpp_stage in ['init', 'timestep_init', 'timestep_finalize', 'finalize'] and \
                                 CCPP_INTERNAL_VARIABLES[CCPP_BLOCK_NUMBER] in local_vars[var_standard_name]['name'] and \
-                                CCPP_HORIZONTAL_DIMENSION in var.dimensions:
+                                '{}:{}'.format(CCPP_CONSTANT_ONE,CCPP_HORIZONTAL_DIMENSION) in var.dimensions:
                             # Reuse existing temporary variable, if possible
                             if local_vars[var_standard_name]['name'] in tmpvars.keys():
                                 # If the variable already has a local variable (tmpvar), reuse it
@@ -1166,7 +1305,7 @@ end module {module}
                                     else:
                                         # Handle dimensions like "A:B", "A:3", "-1:Z"
                                         if ':' in dim:
-                                            dims = dim.split(':')
+                                            dims = [ x.lower() for x in dim.split(':')]
                                             try:
                                                 dim0 = int(dims[0])
                                             except ValueError:
@@ -1185,7 +1324,7 @@ end module {module}
                                         alloc_dimensions.append('{}:{}'.format(dim0,dim1))
 
                                 # Padding of additional dimensions - before and after the horizontal dimension
-                                hdim_index = tmpvar.dimensions.index(CCPP_HORIZONTAL_DIMENSION)
+                                hdim_index = tmpvar.dimensions.index('{}:{}'.format(CCPP_CONSTANT_ONE,CCPP_HORIZONTAL_DIMENSION))
                                 dimpad_before = '' + ':,'*(len(tmpvar.dimensions[:hdim_index]))
                                 dimpad_after  = '' + ',:'*(len(tmpvar.dimensions[hdim_index+1:]))
 
@@ -1193,7 +1332,8 @@ end module {module}
                                 var_defs_manual.append('integer :: ib, nb')
 
                                 # Define actions before. Always copy data in, independent of intent.
-                                actions_in = '''        allocate({tmpvar}({dims}))
+                                actions_in = '''        ! Allocate local variable to copy blocked data {var} into a contiguous array
+        allocate({tmpvar}({dims}))
         ib = 1
         do nb=1,{block_count}
           {tmpvar}({dimpad_before}ib:ib+{block_size}-1{dimpad_after}) = {var}
@@ -1269,11 +1409,23 @@ end module {module}
                         # Variables stored in blocked data structures but without horizontal dimension not supported at this time (doesn't make sense anyway)
                         elif ccpp_stage in ['init', 'timestep_init', 'timestep_finalize', 'finalize'] and \
                                 CCPP_INTERNAL_VARIABLES[CCPP_BLOCK_NUMBER] in local_vars[var_standard_name]['name']:
-                            raise Exception("Variables stored in blocked data structures but without horizontal dimension not supported at this time: {}".format(var_standard_name))
+                            raise Exception("Variables stored in blocked data structures but without horizontal dimension not supported in phases ' + \
+                                            'init, timestep_init, timestep_finalize, finalize at this time: {} in {}".format(var_standard_name, subroutine_name))
+
+                        # Limitations for UFS: Variables stored in threaded data structures (i.e. only for one block at a time) in GFS_interstitial DDT
+                        # are not supported at this time (doesn't make sense anyway)
+                        elif ccpp_stage in ['init', 'timestep_init', 'timestep_finalize', 'finalize'] and \
+                                CCPP_INTERNAL_VARIABLES[CCPP_THREAD_NUMBER] in local_vars[var_standard_name]['name']:
+                            raise Exception("Variables stored in thread-specific data structures (GFS_interstitial DDT) are not supported in phases ' + \
+                                            'init, timestep_init, timestep_finalize, finalize at this time: {} in {}".format(var_standard_name, subroutine_name))
 
                         # Unit conversions without converting blocked data structures
                         elif var.actions['in'] or var.actions['out']:
-                            actions_in = ''
+                            # If requested, check that arrays are allocated/associated and have the correct size
+                            if debug:
+                                actions_in = assign_test
+                            else:
+                                actions_in = ''
                             actions_out = ''
                             if local_vars[var_standard_name]['name'] in tmpvars.keys():
                                 # If the variable already has a local variable (tmpvar), reuse it
@@ -1323,14 +1475,24 @@ end module {module}
 
                         # Ordinary variables, no blocked data or unit conversions
                         elif var_standard_name in arguments[scheme_name][subroutine_name]:
-                            # Add to argument list if required
+                            if debug and assign_test:
+                                actions_in = assign_test
+                                # Add the conditionals for the "before" operations
+                                actions_before += '''
+      if ({conditional}) then
+{actions_in}
+      end if
+'''.format(conditional=conditionals[var_standard_name],
+           actions_in=actions_in.rstrip('\n'))
+
+                            # Add to argument list
                             arg = '{local_name}={var_name},'.format(local_name=var.local_name, 
                                                                     var_name=local_vars[var_standard_name]['name'])
                         else:
                             arg = ''
                         args += arg
                         length += len(arg)
-                        # Split args so that lines don't exceed 260 characters (for PGI)
+                        # Split args so that lines don't get too long
                         if length > 70 and not var_standard_name == arguments[scheme_name][subroutine_name][-1]:
                             args += ' &\n                  '
                             length = 0
@@ -1347,19 +1509,51 @@ end module {module}
         ierr={target_name_flag}
         return
       end if
-'''.format(target_name_flag=ccpp_error_flag_target_name, target_name_msg=ccpp_error_msg_target_name, subroutine_name=subroutine_name)
-                    body += '''
+'''.format(target_name_flag=ccpp_error_code_target_name, target_name_msg=ccpp_error_msg_target_name, subroutine_name=subroutine_name)
+                    subcycle_body += '''
       {subroutine_call}
       {error_check}
     '''.format(subroutine_call=subroutine_call, error_check=error_check)
 
                     module_use += '   use {m}, only: {s}\n'.format(m=module_name, s=subroutine_name)
 
-                if subcycle.loop > 1 and ccpp_stage == 'run':
-                    body += '''
+                # If this subcycle calls any schemes, i.e. has any variables registered
+                # that need to be passed to the group for this stage, then handle the
+                # subcycle loops by prepending/appending the necessary code to subcycle_body
+                subcycle_body_prefix = '''
+      ! Start of next subcycle
+'''
+                subcycle_body_suffix = ''
+                if self.parents[ccpp_stage]:
+                    # Set subcycle loop extent
+                    if ccpp_stage == 'run':
+                        subcycle_body_prefix += '''
+      ! Set loop extent variable for the following subcycle
+      {loop_extent_var_name} = {loop_cnt_max}
+'''.format(loop_extent_var_name=ccpp_loop_extent_target_name,
+                                  loop_cnt_max=subcycle.loop)
+                    else:
+                        subcycle_body_prefix += '''
+      ! Set loop extent variable for the following subcycle
+      {loop_extent_var_name} = 1
+'''.format(loop_extent_var_name=ccpp_loop_extent_target_name)
+                    # Create subcycle (Fortran do loop) if needed
+                    if subcycle.loop > 1 and ccpp_stage == 'run':
+                        subcycle_body_prefix += '''
+      associate(cnt => {loop_var_name})
+      do cnt=1,{loop_cnt_max}\n\n'''.format(loop_var_name=ccpp_loop_counter_target_name,
+                                                        loop_cnt_max=subcycle.loop)
+                        subcycle_body_suffix += '''
       end do
       end associate
 '''
+                    else:
+                        subcycle_body_prefix += '''
+      {loop_var_name} = 1\n'''.format(loop_var_name=ccpp_loop_counter_target_name)
+
+                # Add this subcycle's Fortran body to the group body
+                if subcycle_body:
+                    body += subcycle_body_prefix + subcycle_body + subcycle_body_suffix
 
             # Get list of arguments, module use statement and variable definitions for this subroutine (=stage for the group)
             (self.arguments[ccpp_stage], sub_module_use, sub_var_defs) = create_arguments_module_use_var_defs(
@@ -1377,13 +1571,13 @@ end module {module}
             # at least one subroutine that gets called from this group), or skip.
             if self.arguments[ccpp_stage]:
                 initialized_test_block = Group.initialized_test_blocks[ccpp_stage].format(
-                                            target_name_flag=ccpp_error_flag_target_name,
+                                            target_name_flag=ccpp_error_code_target_name,
                                             target_name_msg=ccpp_error_msg_target_name,
                                             name=self._name)
             else:
                 initialized_test_block = ''
             initialized_set_block = Group.initialized_set_blocks[ccpp_stage].format(
-                                        target_name_flag=ccpp_error_flag_target_name,
+                                        target_name_flag=ccpp_error_code_target_name,
                                         target_name_msg=ccpp_error_msg_target_name,
                                         name=self._name)
             # Create subroutine

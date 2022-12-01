@@ -26,10 +26,14 @@ module ccpp_types
     implicit none
 
     private
-    public :: ccpp_t
+    public :: ccpp_t, one
+
+    !> @var Definition of constant one
+    integer, parameter :: one = 1
 
     !> @var The default loop counter indicating outside of a subcycle loop
     integer, parameter :: CCPP_DEFAULT_LOOP_CNT = -999
+    integer, parameter :: CCPP_DEFAULT_LOOP_MAX = -999
 
     !> @var The default values for block and thread numbers indicating invalid data
     integer, parameter :: CCPP_DEFAULT_BLOCK_AND_THREAD_NUMBER = -999
@@ -51,6 +55,7 @@ module ccpp_types
        integer                                             :: errflg = 0
        character(len=512)                                  :: errmsg = ''
        integer                                             :: loop_cnt = CCPP_DEFAULT_LOOP_CNT
+       integer                                             :: loop_max = CCPP_DEFAULT_LOOP_MAX
        integer                                             :: blk_no = CCPP_DEFAULT_BLOCK_AND_THREAD_NUMBER
        integer                                             :: thrd_no = CCPP_DEFAULT_BLOCK_AND_THREAD_NUMBER
 
