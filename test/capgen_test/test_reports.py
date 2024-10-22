@@ -23,8 +23,8 @@ if not os.path.exists(_SCRIPTS_DIR):
 # end if
 
 if ((sys.version_info[0] < 3) or
-    (sys.version_info[0] == 3) and (sys.version_info[1] < 7)):
-    raise Exception("Python 3.7 or greater required")
+    (sys.version_info[0] == 3) and (sys.version_info[1] < 8)):
+    raise Exception("Python 3.8 or greater required")
 # end if
 
 sys.path.append(_SCRIPTS_DIR)
@@ -68,7 +68,7 @@ _CCPP_FILES = _UTILITY_FILES + \
                os.path.join(_BUILD_DIR, "ccpp", "ccpp_ddt_suite_cap.F90"),
                os.path.join(_BUILD_DIR, "ccpp", "ccpp_temp_suite_cap.F90")]
 _PROCESS_LIST = ["setter=temp_set", "adjusting=temp_calc_adjust"]
-_MODULE_LIST = ["environ_conditions", "make_ddt", "temp_adjust",
+_MODULE_LIST = ["environ_conditions", "make_ddt", "setup_coeffs", "temp_adjust",
                 "temp_calc_adjust", "temp_set"]
 _SUITE_LIST = ["ddt_suite", "temp_suite"]
 _INPUT_VARS_DDT = ["model_times", "number_of_model_times",
@@ -78,21 +78,28 @@ _OUTPUT_VARS_DDT = ["ccpp_error_code", "ccpp_error_message", "model_times",
                     "number_of_model_times"]
 _REQUIRED_VARS_DDT = _INPUT_VARS_DDT + _OUTPUT_VARS_DDT
 _PROT_VARS_TEMP = ["horizontal_loop_begin", "horizontal_loop_end",
-                   "horizontal_dimension", "vertical_layer_dimension"]
+                   "horizontal_dimension", "vertical_layer_dimension",
+                   "number_of_tracers",
+                   # Added for --debug
+                   "index_of_water_vapor_specific_humidity",
+                   "vertical_interface_dimension"]
 _REQUIRED_VARS_TEMP = ["ccpp_error_code", "ccpp_error_message",
                        "potential_temperature",
                        "potential_temperature_at_interface",
+                       "coefficients_for_interpolation",
                        "potential_temperature_increment",
                        "surface_air_pressure", "time_step_for_physics",
                        "water_vapor_specific_humidity"]
 _INPUT_VARS_TEMP = ["potential_temperature",
                     "potential_temperature_at_interface",
+                    "coefficients_for_interpolation",
                     "potential_temperature_increment",
                     "surface_air_pressure", "time_step_for_physics",
                     "water_vapor_specific_humidity"]
 _OUTPUT_VARS_TEMP = ["ccpp_error_code", "ccpp_error_message",
                      "potential_temperature",
                      "potential_temperature_at_interface",
+                     "coefficients_for_interpolation",
                      "surface_air_pressure", "water_vapor_specific_humidity"]
 
 def fields_string(field_type, field_list, sep):
@@ -112,14 +119,14 @@ def fields_string(field_type, field_list, sep):
     return fmsg
 
 def check_datatable(database, report_type, check_list,
-                    sep=',', excl_prot=False):
+                    sep=',', exclude_protected=False):
     """Run a database report and check the return string.
     If an error is found, print an error message.
     Return the number of errors"""
     if sep is None:
         sep = ','
     # end if
-    test_str = datatable_report(database, report_type, sep, excl_prot=excl_prot)
+    test_str = datatable_report(database, report_type, sep, exclude_protected=exclude_protected)
     test_list = [x for x in test_str.split(sep) if x]
     missing = list()
     unexpected = list()
@@ -176,13 +183,13 @@ NUM_ERRORS += check_datatable(_DATABASE, DatatableReport("required_variables",
                               _REQUIRED_VARS_TEMP + _PROT_VARS_TEMP)
 NUM_ERRORS += check_datatable(_DATABASE, DatatableReport("required_variables",
                                                          value="temp_suite"),
-                              _REQUIRED_VARS_TEMP, excl_prot=True)
+                              _REQUIRED_VARS_TEMP, exclude_protected=True)
 NUM_ERRORS += check_datatable(_DATABASE, DatatableReport("input_variables",
                                                          value="temp_suite"),
                               _INPUT_VARS_TEMP + _PROT_VARS_TEMP)
 NUM_ERRORS += check_datatable(_DATABASE, DatatableReport("input_variables",
                                                          value="temp_suite"),
-                              _INPUT_VARS_TEMP, excl_prot=True)
+                              _INPUT_VARS_TEMP, exclude_protected=True)
 NUM_ERRORS += check_datatable(_DATABASE, DatatableReport("output_variables",
                                                          value="temp_suite"),
                               _OUTPUT_VARS_TEMP)

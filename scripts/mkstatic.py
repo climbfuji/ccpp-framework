@@ -14,9 +14,10 @@ import xml.etree.ElementTree as ET
 
 from common import encode_container
 from common import CCPP_STAGES
-from common import CCPP_ERROR_CODE_VARIABLE, CCPP_ERROR_MSG_VARIABLE, CCPP_LOOP_COUNTER, CCPP_LOOP_EXTENT
-from common import CCPP_BLOCK_NUMBER, CCPP_BLOCK_COUNT, CCPP_BLOCK_SIZES, CCPP_THREAD_NUMBER, CCPP_INTERNAL_VARIABLES
-from common import CCPP_CONSTANT_ONE, CCPP_HORIZONTAL_DIMENSION, CCPP_HORIZONTAL_LOOP_EXTENT
+from common import CCPP_T_INSTANCE_VARIABLE, CCPP_ERROR_CODE_VARIABLE, CCPP_ERROR_MSG_VARIABLE, CCPP_LOOP_COUNTER, CCPP_LOOP_EXTENT
+from common import CCPP_BLOCK_NUMBER, CCPP_BLOCK_COUNT, CCPP_BLOCK_SIZES, CCPP_THREAD_NUMBER, CCPP_THREAD_COUNT, CCPP_INTERNAL_VARIABLES
+from common import CCPP_HORIZONTAL_LOOP_BEGIN, CCPP_HORIZONTAL_LOOP_END, CCPP_CHUNK_EXTENT
+from common import CCPP_CONSTANT_ONE, CCPP_HORIZONTAL_DIMENSION, CCPP_HORIZONTAL_LOOP_EXTENT, CCPP_NUM_INSTANCES
 from common import FORTRAN_CONDITIONAL_REGEX_WORDS, FORTRAN_CONDITIONAL_REGEX
 from common import CCPP_TYPE, STANDARD_VARIABLE_TYPES, STANDARD_CHARACTER_TYPE
 from common import CCPP_STATIC_API_MODULE, CCPP_STATIC_SUBROUTINE_NAME
@@ -24,6 +25,10 @@ from metadata_parser import CCPP_MANDATORY_VARIABLES
 from mkcap import Var
 
 ###############################################################################
+
+# Limit suite names to 37 characters; this keeps cap names below 64 characters
+# Cap names of 64 characters or longer can cause issues with some compilers.
+SUITE_NAME_MAX_CHARS = 37
 
 # Maximum number of dimensions of an array allowed by the Fortran 2008 standard
 FORTRAN_ARRAY_MAX_DIMS = 15
@@ -53,6 +58,12 @@ CCPP_SUITE_VARIABLES = { **CCPP_MANDATORY_VARIABLES,
                            active        = 'T',
                            ),
     }
+
+# Type and variable declarations for arrays of pointers, required for optional/inactive variables
+TMPPTR_ARR_TYPE_DECLARATION = '''type :: {pointer_type_name}
+         {tmpptr_def}
+      end type {pointer_type_name}'''
+TMPPTR_ARR_DECLARATION = '''type({pointer_type_name}), dimension({dims}) :: {localname}_array'''
 
 ###############################################################################
 
@@ -91,7 +102,51 @@ def extract_parents_and_indices_from_local_name(local_name):
         parent = local_name[:local_name.find('%')]
     else:
         parent = local_name
+    # Remove whitespaces
+    parent = parent.strip()
+    indices = [ x.strip() for x in indices ]
     return (parent, indices)
+
+def extract_dimensions_from_local_name(local_name):
+    """Extract the dimensions from a local_name.
+    Throw away any parent information."""
+    # First, find delimiter '%' between parent(s) and child '%'
+    parent_delimiter_index = -1
+    if '%' in local_name:
+        i = len(local_name)-1
+        opened = 0
+        while i >= 0:
+            if local_name[i] == ')':
+                opened += 1
+            elif local_name[i] == '(':
+                opened -= 1
+            elif local_name[i] == '%' and opened == 0:
+                parent_delimiter_index = i
+                break
+            i -= 1
+    if '(' in local_name[parent_delimiter_index+1:]:
+        dim_string_start = local_name[parent_delimiter_index+1:].find('(')
+        dim_string_end = local_name[parent_delimiter_index+1:].rfind(')')
+        dim_string = local_name[parent_delimiter_index+1:][dim_string_start:dim_string_end+1]
+        # Now that we have a dim_string, find all dimensions in this string;
+        # ignore outermost opening and closing parentheses.
+        opened = 0
+        dim = ''
+        i = 1
+        dimensions = []
+        while i <= len(dim_string)-1:
+            if dim_string[i] == ',' and opened == 0:
+                dimensions.append(dim)
+                dim = ''
+            elif i == len(dim_string)-1 and dim:
+                dimensions.append(dim)
+            else:
+                dim += dim_string[i]
+            i +=  1
+    else:
+        dimensions = []
+        dim_string = ''
+    return (dimensions, dim_string)
 
 def create_argument_list_wrapped(arguments):
     """Create a wrapped argument list, remove trailing ',' """
@@ -124,7 +179,7 @@ def create_argument_list_wrapped_explicit(arguments, additional_vars_following =
         argument_list = argument_list.rstrip(',')
     return argument_list
 
-def create_arguments_module_use_var_defs(variable_dictionary, metadata_define, tmpvars = None):
+def create_arguments_module_use_var_defs(variable_dictionary, metadata_define, tmpvars = None, tmpptrs = None):
     """Given a dictionary of standard names and variables, and a metadata
     dictionary with the variable definitions by the host model, create a list
     of arguments (local names), module use statements (for derived data types
@@ -133,36 +188,66 @@ def create_arguments_module_use_var_defs(variable_dictionary, metadata_define, t
     module_use = []
     var_defs = []
     local_kind_and_type_vars = []
+    local_pointer_type_defs = []
 
-    for standard_name in variable_dictionary.keys():
-        # Add variable local name and variable definitions
-        arguments.append(variable_dictionary[standard_name].local_name)
-        var_defs.append(variable_dictionary[standard_name].print_def_intent())
-        # Add special kind variables and derived data type definitions to module use statements
-        if variable_dictionary[standard_name].type in STANDARD_VARIABLE_TYPES and variable_dictionary[standard_name].kind \
-                and not variable_dictionary[standard_name].type == STANDARD_CHARACTER_TYPE:
-            kind_var_standard_name = variable_dictionary[standard_name].kind
-            if not kind_var_standard_name in local_kind_and_type_vars:
-                if not kind_var_standard_name in metadata_define.keys():
-                    raise Exception("Kind {kind} not defined by host model".format(kind=kind_var_standard_name))
-                kind_var = metadata_define[kind_var_standard_name][0]
-                module_use.append(kind_var.print_module_use())
-                local_kind_and_type_vars.append(kind_var_standard_name)
-        elif not variable_dictionary[standard_name].type in STANDARD_VARIABLE_TYPES:
-            type_var_standard_name = variable_dictionary[standard_name].type
-            if not type_var_standard_name in local_kind_and_type_vars:
-                if not type_var_standard_name in metadata_define.keys():
-                    raise Exception("Type {type} not defined by host model".format(type=type_var_standard_name))
-                type_var = metadata_define[type_var_standard_name][0]
-                module_use.append(type_var.print_module_use())
-                local_kind_and_type_vars.append(type_var_standard_name)
+    # We need to run through this loop twice. In the first pass, process all scalars.
+    # In the second pass, process all arrays. This is so that any potential dimension
+    # that is used in the following array variable definitions is defined first to avoid
+    # violating the Fortran 2008 standard.
+    # https://community.intel.com/t5/Intel-Fortran-Compiler/Order-of-declaration-statements-with-and-without-implicit-typing/td-p/1176155
+    iteration = 1
+    while iteration <= 2:
+        for standard_name in variable_dictionary.keys():
+            if iteration == 1 and variable_dictionary[standard_name].dimensions:
+                continue
+            elif iteration == 2 and not variable_dictionary[standard_name].dimensions:
+                continue
+            # Add variable local name and variable definitions
+            arguments.append(variable_dictionary[standard_name].local_name)
+            var_defs.append(variable_dictionary[standard_name].print_def_intent(metadata_define))
+            # Add special kind variables and derived data type definitions to module use statements
+            if variable_dictionary[standard_name].type in STANDARD_VARIABLE_TYPES and variable_dictionary[standard_name].kind \
+                    and not variable_dictionary[standard_name].type == STANDARD_CHARACTER_TYPE:
+                kind_var_standard_name = variable_dictionary[standard_name].kind
+                if not kind_var_standard_name in local_kind_and_type_vars:
+                    if not kind_var_standard_name in metadata_define.keys():
+                        raise Exception("Kind {kind} not defined by host model".format(kind=kind_var_standard_name))
+                    kind_var = metadata_define[kind_var_standard_name][0]
+                    module_use.append(kind_var.print_module_use())
+                    local_kind_and_type_vars.append(kind_var_standard_name)
+            elif not variable_dictionary[standard_name].type in STANDARD_VARIABLE_TYPES:
+                type_var_standard_name = variable_dictionary[standard_name].type
+                if not type_var_standard_name in local_kind_and_type_vars:
+                    if not type_var_standard_name in metadata_define.keys():
+                        raise Exception("Type {type} not defined by host model".format(type=type_var_standard_name))
+                    type_var = metadata_define[type_var_standard_name][0]
+                    module_use.append(type_var.print_module_use())
+                    local_kind_and_type_vars.append(type_var_standard_name)
+        iteration += 1
 
-    # Add any local variables (required for unit conversions, array transformations, ...)
-    if tmpvars:
+    # Add any local variables (required for unit conversions, array transformations, ...),
+    # and add any local pointers (required for conditionally allocated arrays)
+    if tmpvars or tmpptrs:
         var_defs.append('')
-        var_defs.append('! Local variables for unit conversions, array transformations, ...')
-        for tmpvar in tmpvars:
-            var_defs.append(tmpvar.print_def_local())
+        var_defs.append('! Local variables/pointers for unit conversions, array transformations, ...')
+        for tmpvar in list(tmpvars) + list(tmpptrs):
+            # Regular variables
+            if tmpvar in list(tmpvars):
+                var_defs.append(tmpvar.print_def_local(metadata_define))
+            # Pointers are more complicated
+            else:
+                if tmpvar.type == 'character' and 'len=' in tmpvar.kind:
+                    pointer_type_name = f"{tmpvar.type}_{tmpvar.kind.replace('=','')}_r{len(tmpvar.dimensions)}_ptr_arr_type"
+                elif tmpvar.kind:
+                    pointer_type_name = f"{tmpvar.type}_{tmpvar.kind}_rank{len(tmpvar.dimensions)}_ptr_arr_type"
+                else:
+                    pointer_type_name = f"{tmpvar.type}_default_kind_rank{len(tmpvar.dimensions)}_ptr_arr_type"
+                if not pointer_type_name in local_pointer_type_defs:
+                    var_defs.append(TMPPTR_ARR_TYPE_DECLARATION.format(pointer_type_name=pointer_type_name,
+                        tmpptr_def=tmpvar.print_def_local(metadata_define)))
+                    local_pointer_type_defs.append(pointer_type_name)
+                var_defs.append(TMPPTR_ARR_DECLARATION.format(pointer_type_name=pointer_type_name,
+                    dims=f'1:{CCPP_INTERNAL_VARIABLES[CCPP_THREAD_COUNT]}', localname=tmpvar.local_name))
             # Add special kind variables
             if tmpvar.type in STANDARD_VARIABLE_TYPES and tmpvar.kind and not tmpvar.type == STANDARD_CHARACTER_TYPE:
                 kind_var_standard_name = tmpvar.kind
@@ -612,6 +697,12 @@ end module {module}
             success = False
             return success
 
+        # Check if suite name is too long
+        if len(self._name) > SUITE_NAME_MAX_CHARS:
+            logging.critical(f"Suite name {self._name} has more than the allowed {SUITE_NAME_MAX_CHARS} characters")
+            success = False
+            return success
+
         # Flattened lists of all schemes and subroutines in SDF
         self._all_schemes_called = []
         self._all_subroutines_called = []
@@ -871,7 +962,7 @@ module {module}
    private
    public :: {subroutines}
 
-   logical, dimension(100), save :: initialized = .false.
+   logical, dimension({num_instances}), save :: initialized = .false.
 
    contains
 '''
@@ -905,37 +996,37 @@ end module {module}
 
     initialized_test_blocks = {
         'init' : '''
-      if (initialized(cdata%ccpp_instance)) return
+      if (initialized({ccpp_var_name}%ccpp_instance)) return
 ''',
         'timestep_init' : '''
-      if (.not.initialized(cdata%ccpp_instance)) then
+      if (.not.initialized({ccpp_var_name}%ccpp_instance)) then
         write({target_name_msg},'(*(a))') '{name}_timestep_init called before {name}_init'
         {target_name_flag} = 1
         return
       end if
 ''',
         'run' : '''
-      if (.not.initialized(cdata%ccpp_instance)) then
+      if (.not.initialized({ccpp_var_name}%ccpp_instance)) then
         write({target_name_msg},'(*(a))') '{name}_run called before {name}_init'
         {target_name_flag} = 1
         return
       end if
 ''',
         'timestep_finalize' : '''
-      if (.not.initialized(cdata%ccpp_instance)) then
+      if (.not.initialized({ccpp_var_name}%ccpp_instance)) then
         write({target_name_msg},'(*(a))') '{name}_timestep_finalize called before {name}_init'
         {target_name_flag} = 1
         return
       end if
 ''',
         'finalize' : '''
-      if (.not.initialized(cdata%ccpp_instance)) return
+      if (.not.initialized({ccpp_var_name}%ccpp_instance)) return
 ''',
     }
 
     initialized_set_blocks = {
         'init' : '''
-      initialized(cdata%ccpp_instance) = .true.
+      initialized({ccpp_var_name}%ccpp_instance) = .true.
 ''',
         'timestep_init' : '',
         'run' : '',
@@ -974,7 +1065,10 @@ end module {module}
         ccpp_loop_extent_target_name = metadata_request[CCPP_LOOP_EXTENT][0].target
         ccpp_error_code_target_name = metadata_request[CCPP_ERROR_CODE_VARIABLE][0].target
         ccpp_error_msg_target_name = metadata_request[CCPP_ERROR_MSG_VARIABLE][0].target
-        #
+        # Then, identify the variable name of the mandatory ccpp_t variable defined by the host model
+        ccpp_var = metadata_define[CCPP_T_INSTANCE_VARIABLE][0]
+
+        # Init
         module_use = ''
         self._module = 'ccpp_{suite}_{name}_cap'.format(name=self._name, suite=self._suite)
         self._filename = '{module_name}.F90'.format(module_name=self._module)
@@ -992,6 +1086,9 @@ end module {module}
             # For mapping temporary variable names (for unit conversions, etc) to local variable names
             tmpvar_cnt = 0
             tmpvars    = collections.OrderedDict()
+            # For mapping temporary pointer names (for potentially unallocated arrays) to local variable names
+            tmpptr_cnt = 0
+            tmpptrs    = collections.OrderedDict()
             #
             body = ''
             # Variable definitions automatically added for subroutines
@@ -1021,16 +1118,34 @@ end module {module}
                     args = ''
                     length = 0
 
-                    # First identify all dimensions needed to handle the arguments
-                    # and add them to the list of required variables for the cap
+                    # First, add a few mandatory variables to the list of required
+                    # variables. This is mostly for handling horizontal dimensions
+                    # correctly for the different CCPP phases and for cases when
+                    # blocked data structures or chunked arrays are used.
                     additional_variables_required = []
-                    #
+                    if CCPP_HORIZONTAL_LOOP_EXTENT in metadata_define.keys():
+                        for add_var in [ CCPP_CONSTANT_ONE, CCPP_HORIZONTAL_LOOP_EXTENT]:
+                            if not add_var in local_vars.keys() \
+                                    and not add_var in additional_variables_required + arguments[scheme_name][subroutine_name]:
+                                logging.debug("Adding variable {} for handling blocked data structures".format(add_var))
+                                additional_variables_required.append(add_var)
+                    elif ccpp_stage == 'run' and \
+                            CCPP_HORIZONTAL_LOOP_BEGIN in metadata_define.keys() and \
+                            CCPP_HORIZONTAL_LOOP_END in metadata_define.keys() and \
+                            CCPP_CHUNK_EXTENT in metadata_define.keys():
+                        for add_var in [ CCPP_HORIZONTAL_LOOP_BEGIN, CCPP_HORIZONTAL_LOOP_END, CCPP_CHUNK_EXTENT]:
+                            if not add_var in local_vars.keys() \
+                                    and not add_var in additional_variables_required + arguments[scheme_name][subroutine_name]:
+                                logging.debug("Adding variable {} for handling chunked data arrays".format(add_var))
+                                additional_variables_required.append(add_var)
+                    # Next, identify all dimensions needed to handle the arguments
+                    # and add them to the list of required variables for the cap
                     for var_standard_name in arguments[scheme_name][subroutine_name]:
                         if not var_standard_name in metadata_define.keys():
                             raise Exception('Variable {standard_name} not defined in host model metadata'.format(
                                                                                 standard_name=var_standard_name))
                         var = metadata_define[var_standard_name][0]
-                        # dim can be 'A', '1', '1:A', ...
+                        # dim_expression can be 'A', '1', '1:A', ...
                         for dim_expression in var.dimensions:
                             dims = dim_expression.split(':')
                             for dim in dims:
@@ -1048,18 +1163,11 @@ end module {module}
 
                         # If blocked data structures need to be converted, add necessary variables
                         if ccpp_stage in ['init', 'timestep_init', 'timestep_finalize', 'finalize'] and CCPP_INTERNAL_VARIABLES[CCPP_BLOCK_NUMBER] in var.local_name:
-                            if not CCPP_BLOCK_COUNT in local_vars.keys() \
-                                    and not CCPP_BLOCK_COUNT in additional_variables_required + arguments[scheme_name][subroutine_name]:
-                                    logging.debug("Adding variable {} for handling blocked data structures".format(CCPP_BLOCK_COUNT))
-                                    additional_variables_required.append(CCPP_BLOCK_COUNT)
-                            if not CCPP_HORIZONTAL_LOOP_EXTENT in local_vars.keys() \
-                                    and not CCPP_HORIZONTAL_LOOP_EXTENT in additional_variables_required + arguments[scheme_name][subroutine_name]:
-                                    logging.debug("Adding variable {} for handling blocked data structures".format(CCPP_HORIZONTAL_LOOP_EXTENT))
-                                    additional_variables_required.append(CCPP_HORIZONTAL_LOOP_EXTENT)
-                            if not CCPP_HORIZONTAL_DIMENSION in local_vars.keys() \
-                                    and not CCPP_HORIZONTAL_DIMENSION in additional_variables_required + arguments[scheme_name][subroutine_name]:
-                                    logging.debug("Adding variable {} for handling blocked data structures".format(CCPP_HORIZONTAL_DIMENSION))
-                                    additional_variables_required.append(CCPP_HORIZONTAL_DIMENSION)
+                            for add_var in [ CCPP_BLOCK_COUNT, CCPP_HORIZONTAL_DIMENSION]:
+                                if not add_var in local_vars.keys() \
+                                        and not add_var in additional_variables_required + arguments[scheme_name][subroutine_name]:
+                                    logging.debug("Adding variable {} for handling blocked data structures".format(add_var))
+                                    additional_variables_required.append(add_var)
 
                         # If the variable is only active/used under certain conditions, add necessary variables
                         # also record the conditional for later use in unit conversions / blocked data conversions.
@@ -1097,115 +1205,294 @@ end module {module}
                         if not var_standard_name in conditionals.keys():
                             conditionals[var_standard_name] = conditional
 
-                    # Extract all variables needed (including indices for components/slices of arrays)
-                    for var_standard_name in additional_variables_required + arguments[scheme_name][subroutine_name]:
-                        # Pick the correct variable for this module/scheme/subroutine
-                        # from the list of requested variable, if it is in that list
-                        if var_standard_name in arguments[scheme_name][subroutine_name]:
-                            for var in metadata_request[var_standard_name]:
-                                if container == var.container:
-                                    break
-                        # This is a dimension or required variable added automatically (e.g. for handling blocked data)
-                        else:
-                            # Create a copy of the variable in the metadata dictionary
-                            # of host model variables and set necessary default values
-                            var = copy.deepcopy(metadata_define[var_standard_name][0])
-                            var.intent = 'in'
+                    # Extract all variables needed (including indices for components/slices of arrays and
+                    # including their parents). We need to run this twice, because the dimensions of parent
+                    # variables get added to additional_variables_required in the first pass.
+                    iteration = 1
+                    while iteration <= 2:
+                        for var_standard_name in additional_variables_required + arguments[scheme_name][subroutine_name]:
+                            # Pick the correct variable for this module/scheme/subroutine
+                            # from the list of requested variables, if it is in that list
+                            if var_standard_name in arguments[scheme_name][subroutine_name]:
+                                for var in metadata_request[var_standard_name]:
+                                    if container == var.container:
+                                        break
+                            # This is a dimension or required variable added automatically (e.g. for handling blocked data)
+                            else:
+                                # Create a copy of the variable in the metadata dictionary
+                                # of host model variables and set necessary default values
+                                var = copy.deepcopy(metadata_define[var_standard_name][0])
+                                var.intent = 'in'
 
-                        if not var_standard_name in local_vars.keys():
-                            # The full name of the variable as known to the host model
-                            var_local_name_define = metadata_define[var_standard_name][0].local_name
+                            if not var_standard_name in local_vars.keys():
+                                # The full name of the variable as known to the host model
+                                var_local_name_define = metadata_define[var_standard_name][0].local_name
 
-                            # Break apart var_local_name_define into the different components (members of DDTs)
-                            # to determine all variables that are required
-                            (parent_local_name_define, parent_local_names_define_indices) = \
-                                extract_parents_and_indices_from_local_name(var_local_name_define)
+                                # Break apart var_local_name_define into the different components (members of DDTs)
+                                # to determine all variables that are required
+                                (parent_local_name_define, parent_local_names_define_indices) = \
+                                    extract_parents_and_indices_from_local_name(var_local_name_define)
 
-                            parent_standard_name = None
-                            parent_var = None
-                            # Check for each of the derived parent local names as defined by the host model
-                            # if they are registered (i.e. if there is a standard name for it). Note that
-                            # the output of extract_parents_and_indices_from_local_name is stripped of any
-                            # array subset information, i.e. a local name 'Atm(:)%...' will produce a
-                            # parent local name 'Atm'. Since the rank of the parent variable is not known
-                            # at this point and since the local name in the host model metadata table could
-                            # contain '(:)', '(:,:)', ... (up to the rank of the array), we search for the
-                            # maximum number of dimensions allowed by the Fortran standard.
-                            for local_name_define in [parent_local_name_define] + parent_local_names_define_indices:
                                 parent_standard_name = None
                                 parent_var = None
-                                for i in range(FORTRAN_ARRAY_MAX_DIMS+1):
-                                    if i==0:
-                                        dims_string = ''
-                                    else:
-                                        # (:) for i==1, (:,:) for i==2, ...
-                                        dims_string = '(' + ','.join([':' for j in range(i)]) + ')'
-                                    if local_name_define+dims_string in standard_name_by_local_name_define.keys():
-                                        parent_standard_name = standard_name_by_local_name_define[local_name_define+dims_string]
-                                        parent_var = metadata_define[parent_standard_name][0]
-                                        break
-                                if not parent_var:
-                                    raise Exception('Parent variable {parent} of {child} with standard name '.format(
-                                                               parent=local_name_define, child=var_local_name_define)+\
-                                                    '{standard_name} not defined in host model metadata'.format(
-                                                                               standard_name=var_standard_name))
+                                # Check for each of the derived parent local names as defined by the host model
+                                # if they are registered (i.e. if there is a standard name for it). Note that
+                                # the output of extract_parents_and_indices_from_local_name is stripped of any
+                                # array subset information, i.e. a local name 'Atm(:)%...' will produce a
+                                # parent local name 'Atm'. Since the rank of the parent variable is not known
+                                # at this point and since the local name in the host model metadata table could
+                                # contain '(:)', '(:,:)', ... (up to the rank of the array), we search for the
+                                # maximum number of dimensions allowed by the Fortran standard.
+                                for local_name_define in [parent_local_name_define] + parent_local_names_define_indices:
+                                    parent_standard_name = None
+                                    parent_var = None
+                                    for i in range(FORTRAN_ARRAY_MAX_DIMS+1):
+                                        if i==0:
+                                            dims_string = ''
+                                        else:
+                                            # (:) for i==1, (:,:) for i==2, ...
+                                            dims_string = '(' + ','.join([':' for j in range(i)]) + ')'
+                                        if local_name_define+dims_string in standard_name_by_local_name_define.keys():
+                                            parent_standard_name = standard_name_by_local_name_define[local_name_define+dims_string]
+                                            parent_var = metadata_define[parent_standard_name][0]
+                                            break
+                                    if not parent_var:
+                                        raise Exception('Parent variable {parent} of {child} with standard name '.format(
+                                                                   parent=local_name_define, child=var_local_name_define)+\
+                                                        '{standard_name} not defined in host model metadata'.format(
+                                                                                   standard_name=var_standard_name))
 
-                                # Reset local name for entire array to a notation without (:), (:,:), etc.;
-                                # this is needed for the var.print_def_intent() routine to work correctly
-                                parent_var.local_name = local_name_define
+                                    # Reset local name for entire array to a notation without (:), (:,:), etc.;
+                                    # this is needed for the var.print_def_intent() routine to work correctly
+                                    parent_var.local_name = local_name_define
 
-                                # Add variable to dictionary of parent variables, if not already there.
-                                # Set or update intent, depending on whether the variable is an index
-                                # in var_local_name_define or the actual parent of that variable.
-                                if not parent_standard_name in self.parents[ccpp_stage].keys():
-                                    self.parents[ccpp_stage][parent_standard_name] = copy.deepcopy(parent_var)
-                                    # Copy the intent of the actual variable being processed
+                                    # Add the parent_var's dimensions to the locally defined dimensions:
+                                    # dim_expression can be 'A', '1', '1:A', ...
+                                    for dim_expression in parent_var.dimensions:
+                                        dims = dim_expression.split(':')
+                                        for dim in dims:
+                                            dim = dim.lower()
+                                            try:
+                                                dim = int(dim)
+                                            except ValueError:
+                                                if not dim in local_vars.keys() and \
+                                                        not dim in additional_variables_required + arguments[scheme_name][subroutine_name]:
+                                                    if not dim in metadata_define.keys():
+                                                        raise Exception('Dimension {}, required by parent variable {}, not defined in host model metadata'.format(
+                                                                                                                                       dim, parent_standard_name))
+                                                    logging.debug("Adding dimension {} for parent variable {}".format(dim, parent_standard_name))
+                                                    additional_variables_required.append(dim)
+
+                                    # Add variable to dictionary of parent variables, if not already there.
+                                    # Set or update intent, depending on whether the variable is an index
+                                    # in var_local_name_define or the actual parent of that variable.
+                                    if not parent_standard_name in self.parents[ccpp_stage].keys():
+                                        self.parents[ccpp_stage][parent_standard_name] = copy.deepcopy(parent_var)
+                                        # Copy the intent of the actual variable being processed
+                                        if local_name_define == parent_local_name_define:
+                                            self.parents[ccpp_stage][parent_standard_name].intent = var.intent
+                                        # It's an index for the actual variable being processed --> intent(in)
+                                        else:
+                                            self.parents[ccpp_stage][parent_standard_name].intent = 'in'
+                                    elif self.parents[ccpp_stage][parent_standard_name].intent == 'in':
+                                        # Adjust the intent if the actual variable is not intent(in)
+                                        if local_name_define == parent_local_name_define and not var.intent == 'in':
+                                            self.parents[ccpp_stage][parent_standard_name].intent = 'inout'
+                                        # It's an index for the actual variable being processed, intent is ok
+                                        #else:
+                                        #   # nothing to do
+                                    elif self.parents[ccpp_stage][parent_standard_name].intent == 'out':
+                                        # Adjust the intent if the actual variable is not intent(out)
+                                        if local_name_define == parent_local_name_define and not var.intent == 'out':
+                                            self.parents[ccpp_stage][parent_standard_name].intent = 'inout'
+                                        # Adjust the intent, because the variable is also used as index variable
+                                        else:
+                                            self.parents[ccpp_stage][parent_standard_name].intent = 'inout'
+
+                                    # Record the parent information for this variable (with standard name var_standard_name)
                                     if local_name_define == parent_local_name_define:
-                                        self.parents[ccpp_stage][parent_standard_name].intent = var.intent
-                                    # It's an index for the actual variable being processed --> intent(in)
-                                    else:
-                                        self.parents[ccpp_stage][parent_standard_name].intent = 'in'
-                                elif self.parents[ccpp_stage][parent_standard_name].intent == 'in':
-                                    # Adjust the intent if the actual variable is not intent(in)
-                                    if local_name_define == parent_local_name_define and not var.intent == 'in':
-                                        self.parents[ccpp_stage][parent_standard_name].intent = 'inout'
-                                    # It's an index for the actual variable being processed, intent is ok
-                                    #else:
-                                    #   # nothing to do
-                                elif self.parents[ccpp_stage][parent_standard_name].intent == 'out':
-                                    # Adjust the intent if the actual variable is not intent(out)
-                                    if local_name_define == parent_local_name_define and not var.intent == 'out':
-                                        self.parents[ccpp_stage][parent_standard_name].intent = 'inout'
-                                    # Adjust the intent, because the variable is also used as index variable
-                                    else:
-                                        self.parents[ccpp_stage][parent_standard_name].intent = 'inout'
+                                        local_vars[var_standard_name] = {
+                                            'name' : metadata_define[var_standard_name][0].local_name,
+                                            'kind' : metadata_define[var_standard_name][0].kind,
+                                            'parent_standard_name' : parent_standard_name
+                                            }
 
-                                # Record the parent information for this variable (with standard name var_standard_name)
-                                if local_name_define == parent_local_name_define:
-                                    local_vars[var_standard_name] = {
-                                        'name' : metadata_define[var_standard_name][0].local_name,
-                                        'kind' : metadata_define[var_standard_name][0].kind,
-                                        'parent_standard_name' : parent_standard_name
-                                        }
+                                # Reset parent to actual parent of the variable with standard name var_standard_name
+                                if local_vars[var_standard_name]['parent_standard_name']:
+                                    parent_standard_name = local_vars[var_standard_name]['parent_standard_name']
+                                    parent_var = metadata_define[parent_standard_name][0]
 
-                            # Reset parent to actual parent of the variable with standard name var_standard_name
-                            if local_vars[var_standard_name]['parent_standard_name']:
+                            elif local_vars[var_standard_name]['parent_standard_name']:
                                 parent_standard_name = local_vars[var_standard_name]['parent_standard_name']
                                 parent_var = metadata_define[parent_standard_name][0]
+                                # Update intent information if necessary
+                                if self.parents[ccpp_stage][parent_standard_name].intent == 'in' and not var.intent == 'in':
+                                    self.parents[ccpp_stage][parent_standard_name].intent = 'inout'
+                                elif self.parents[ccpp_stage][parent_standard_name].intent == 'out' and not var.intent == 'out':
+                                    self.parents[ccpp_stage][parent_standard_name].intent = 'inout'
 
-                        elif local_vars[var_standard_name]['parent_standard_name']:
-                            parent_standard_name = local_vars[var_standard_name]['parent_standard_name']
-                            parent_var = metadata_define[parent_standard_name][0]
-                            # Update intent information if necessary
-                            if self.parents[ccpp_stage][parent_standard_name].intent == 'in' and not var.intent == 'in':
-                                self.parents[ccpp_stage][parent_standard_name].intent = 'inout'
-                            elif self.parents[ccpp_stage][parent_standard_name].intent == 'out' and not var.intent == 'out':
-                                self.parents[ccpp_stage][parent_standard_name].intent = 'inout'
+                        # End of iteration (while) loop, increase iteration counter
+                        iteration += 1
 
-                        # The remainder of this loop deals with adding variables to the argument list
-                        # for this subroutine, not required for the additional dimensions and variables
-                        if not var_standard_name in arguments[scheme_name][subroutine_name]:
-                            continue
+                    # Loop over actual arguments for this subroutine and create the argument list.
+                    # This is not required for the additional dimensions and variables.
+                    for var_standard_name in arguments[scheme_name][subroutine_name]:
+                        # Pick the correct variable for this module/scheme/subroutine
+                        # from the list of requested variables
+                        for var in metadata_request[var_standard_name]:
+                            if container == var.container:
+                                break
+
+                        # We need some information about the host model variable
+                        (dimensions_target_name, dim_string_target_name) = extract_dimensions_from_local_name(var.target)
+
+                        # Derive correct horizontal loop extent for this variable for the rest of this function
+                        if var.rank:
+                            array_size = []
+                            dim_substrings = []
+                            for dim in var.dimensions:
+
+                                # Work around for GNU compiler bugs related to allocatable strings
+                                # in older versions of GNU (at least 9.2.0)
+                                if var.rank and var.type == 'character':
+                                    use_explicit_dimension = False
+                                else:
+                                    use_explicit_dimension = True
+ 
+                                # This is not supported/implemented: tmpvar would have one dimension less
+                                # than the original array, and the metadata requesting the variable would
+                                # not pass the initial test that host model variables and scheme variables
+                                # have the same rank.
+                                if dim == CCPP_BLOCK_NUMBER:
+                                    raise Exception("{} cannot be part of the dimensions of variable {}".format(
+                                                                          CCPP_BLOCK_NUMBER, var_standard_name))
+                                else:
+                                    # Handle dimensions like "A:B", "A:3", "-1:Z"
+                                    if ':' in dim:
+                                        dims = [ x.lower() for x in dim.split(':')]
+                                        try:
+                                            dim0 = int(dims[0])
+                                            dim0 = dims[0]
+                                        except ValueError:
+                                            if not dims[0].lower() in metadata_define.keys():
+                                                raise Exception('Dimension {}, required by variable {}, not defined in host model metadata'.format(
+                                                                                                               dims[0].lower(), var_standard_name))
+                                            dim0 = metadata_define[dims[0].lower()][0].local_name
+                                        try:
+                                            dim1 = int(dims[1])
+                                            dim1 = dims[1]
+                                        except ValueError:
+                                            # Use correct horizontal variables in run phase
+                                            if ccpp_stage == 'run' and dims[1].lower() == CCPP_HORIZONTAL_LOOP_EXTENT:
+                                                # Provide backward compatibility with blocked data structures
+                                                # and bypass the unresolved problems with inactive data
+
+                                                # For this, we need to check if the host model variable
+                                                # is a contiguous array (it's horizontal dimension is
+                                                # CCPP_HORIZONTAL_DIMENSION) or part of a blocked data
+                                                # structure (it's horizontal dimension is CCPP_HORIZONTAL_LOOP_EXTENT)
+                                                for dim in metadata_define[var_standard_name][0].dimensions:
+                                                    if ':' in dim:
+                                                        host_var_dims = [x.lower() for x in dim.split(':')]
+                                                    # Single dimensions are indices and should not be recorded as a dimension!
+                                                    else:
+                                                        raise Exception("THIS SHOULD NOT HAPPEN WITH CAPGEN'S METADATA PARSER")
+                                                    if CCPP_HORIZONTAL_DIMENSION in host_var_dims:
+                                                        host_var_is_contiguous = True
+                                                    elif CCPP_HORIZONTAL_LOOP_EXTENT in host_var_dims:
+                                                        host_var_is_contiguous = False
+                                                if CCPP_HORIZONTAL_LOOP_BEGIN in metadata_define.keys() and host_var_is_contiguous:
+                                                    dim0 = metadata_define[CCPP_HORIZONTAL_LOOP_BEGIN][0].local_name
+                                                    dim1 = metadata_define[CCPP_HORIZONTAL_LOOP_END][0].local_name
+                                                    use_explicit_dimension = True
+                                                else:
+                                                    dim0 = metadata_define[CCPP_CONSTANT_ONE][0].local_name
+                                                    dim1 = metadata_define[CCPP_HORIZONTAL_LOOP_EXTENT][0].local_name
+                                                # Remove this variable so that we can catch errors
+                                                # if it doesn't get set even though it should
+                                                del host_var_is_contiguous
+                                            else:
+                                                if not dims[1].lower() in metadata_define.keys():
+                                                    raise Exception('Dimension {}, required by variable {}, not defined in host model metadata'.format(
+                                                                                                                   dims[1].lower(), var_standard_name))
+                                                dim1 = metadata_define[dims[1].lower()][0].local_name
+                                    # Single dimensions are indices and should not be recorded as a dimension!
+                                    else:
+                                        raise Exception("THIS SHOULD NOT HAPPEN WITH CAPGEN'S METADATA PARSER")
+
+                                    # DH* TODO REMOVE THIS ENTIRE BLOCK in a future PR to feature/capgen
+                                    # This block should not be needed, the metadata parser should take care
+                                    # of flagging invalid dimensions for the host model or the physics.
+                                    # TODO: create a test suite to make sure these things are caught
+                                    # by the metadata parser - do this on the feature/capgen branch!
+                                    if ccpp_stage == 'run':
+                                        # This should not happen when parsing metadata with capgen's metadata parser, remove?
+                                        if dims[1] == CCPP_HORIZONTAL_LOOP_EXTENT and not dim0:
+                                            raise Exception(f"Invalid metadata for scheme {scheme_name}: " + \
+                                                            f"horizontal dimension for {var_standard_name} is {var.dimensions}")
+                                        # This should not happen when parsing metadata with capgen's metadata parser, remove?
+                                        elif CCPP_HORIZONTAL_LOOP_BEGIN in dims or CCPP_HORIZONTAL_LOOP_END in dims or \
+                                                CCPP_HORIZONTAL_DIMENSION in dims:
+                                            raise Exception(f"Invalid metadata for scheme {scheme_name}: " + \
+                                                            f"horizontal dimension for {var_standard_name} is {var.dimensions}")
+                                    else:
+                                        # This should not happen when parsing metadata with capgen's metadata parser, remove?
+                                        if dims[1] == CCPP_HORIZONTAL_DIMENSION and not dim0:
+                                            raise Exception(f"Invalid metadata for scheme {scheme_name}: " + \
+                                                            f"horizontal dimension for {var_standard_name} is {var.dimensions}")
+                                        # This should not happen when parsing metadata with capgen's metadata parser, remove?
+                                        if CCPP_HORIZONTAL_LOOP_BEGIN in dims or CCPP_HORIZONTAL_LOOP_END in dims or \
+                                                CCPP_LOOP_EXTENT in dims:
+                                            raise Exception(f"Invalid metadata for scheme {scheme_name}: " + \
+                                                            f"horizontal dimension for {var_standard_name} is {var.dimensions}")
+                                    # *DH
+
+                                # DH* TODO: WE CANNOT ACTIVATE USING EXPLICIT HORIZONTAL DIMENSIONS
+                                # UNTIL WE HAVE SOLVED THE PROBLEM WITH INACTIVE (NON-ALLOCATED)
+                                # ARRAYS. THIS MUST BE ADDRESSED BEFORE WE SWITCH TO CONTIGUOUS
+                                # ARRAYS FOR MODELS LIKE THE UFS-WEATHER-MODEL!
+                                if use_explicit_dimension:
+                                    if dim0 == dim1:
+                                        array_size.append('1')
+                                        dim_substrings.append(f'{dim1}')
+                                    else:
+                                        array_size.append(f'({dim1}-{dim0}+1)')
+                                        dim_substrings.append(f'{dim0}:{dim1}')
+                                else:
+                                    if dim0 == dim1:
+                                        array_size.append('1')
+                                        dim_substrings.append(f':')
+                                    else:
+                                        array_size.append(f'({dim1}-{dim0}+1)')
+                                        dim_substrings.append(f':')
+
+                            # Now we need to compare dim_substrings with a possible dim_string_target_name and merge them
+                            if dimensions_target_name:
+                                if len(dimensions_target_name) < len(dim_substrings):
+                                    raise Exception("THIS SHOULD NOT HAPPEN")
+                                dim_counter = 0
+                                dim_string = '('
+                                for dim in dimensions_target_name:
+                                    if ':' in dim:
+                                        dim_string += dim_substrings[dim_counter] + ','
+                                        dim_counter += 1
+                                    else:
+                                        dim_string += dim + ','
+                                dim_string = dim_string.rstrip(',') + ')'
+                                # Consistency check to make sure all dimensions from metadata are 'used'
+                                if dim_counter < len(dim_substrings):
+                                    raise Exception(f"Mismatch of derived dimensions from metadata {dim_substrings} " + \
+                                        f"vs target local name {dimensions_target_name} for {var_standard_name} and " + \
+                                        f"scheme {scheme_name} / phase {ccpp_stage}")
+                            else:
+                                dim_string = '({})'.format(','.join(dim_substrings))
+                            var_size_expected = '({})'.format('*'.join(array_size))
+                        else:
+                            if dimensions_target_name:
+                                dim_string = dim_string_target_name
+                            else:
+                                dim_string = ''
+                            var_size_expected = 1
 
                         # To assist debugging efforts, check if arrays have the correct size (ignore scalars for now)
                         assign_test = ''
@@ -1217,57 +1504,20 @@ end module {module}
                                 # will catch any out of bound reads with the appropriate compiler flags. It naturally
                                 # deals with non-uniform block sizes etc.
                                 pass
-                            elif var.rank:
-                                array_size = []
-                                for dim in var.dimensions:
-                                    # This is not supported/implemented: tmpvar would have one dimension less
-                                    # than the original array, and the metadata requesting the variable would
-                                    # not pass the initial test that host model variables and scheme variables
-                                    # have the same rank.
-                                    if dim == CCPP_BLOCK_NUMBER:
-                                        raise Exception("{} cannot be part of the dimensions of variable {}".format(
-                                                                              CCPP_BLOCK_NUMBER, var_standard_name))
-                                    else:
-                                        # Handle dimensions like "A:B", "A:3", "-1:Z"
-                                        if ':' in dim:
-                                            dims = [ x.lower() for x in dim.split(':')]
-                                            try:
-                                                dim0 = int(dims[0])
-                                                dim0 = dims[0]
-                                            except ValueError:
-                                                if not dims[0].lower() in metadata_define.keys():
-                                                    raise Exception('Dimension {}, required by variable {}, not defined in host model metadata'.format(
-                                                                                                                   dims[0].lower(), var_standard_name))
-                                                dim0 = metadata_define[dims[0].lower()][0].local_name
-                                            try:
-                                                dim1 = int(dims[1])
-                                                dim1 = dims[1]
-                                            except ValueError:
-                                                if not dims[1].lower() in metadata_define.keys():
-                                                    raise Exception('Dimension {}, required by variable {}, not defined in host model metadata'.format(
-                                                                                                                   dims[1].lower(), var_standard_name))
-                                                dim1 = metadata_define[dims[1].lower()][0].local_name
-                                        # Single dimensions
-                                        else:
-                                            dim0 = 1
-                                            try:
-                                                dim1 = int(dim)
-                                                dim1 = dim
-                                            except ValueError:
-                                                if not dim.lower() in metadata_define.keys():
-                                                    raise Exception('Dimension {}, required by variable {}, not defined in host model metadata'.format(
-                                                                                                                       dim.lower(), var_standard_name))
-                                                dim1 = metadata_define[dim.lower()][0].local_name
-                                    array_size.append('({last}-{first}+1)'.format(last=dim1, first=dim0))
-                                var_size_expected  = '({})'.format('*'.join(array_size))
+                            # Some older versions of GNU currently in use can not do these variable size tests on strings
+                            # 0x5b6fdd gimplify_expr(tree_node**, gimple**, gimple**, bool (*)(tree_node*), int)
+                            #   /tmp/role.apps/spack-stage/spack-stage-gcc-9.2.0-ku6r4f5qa5obpfnqpa6pezhogxq6sp7h/spack-src/gcc/gimplify.c:13477
+                            elif var.rank and not var.type == 'character':
                                 assign_test = '''        ! Check if variable {var_name} is associated/allocated and has the correct size
-        if (size({var_name})/={var_size_expected}) then
-          write({ccpp_errmsg}, '(2(a,i8))') 'Detected size mismatch for variable {var_name} in group {group_name} before {subroutine_name}, expected ', &
-                                           {var_size_expected}, ' but got ', size({var_name})
+        if (size({var_name}{dim_string})/={var_size_expected}) then
+          write({ccpp_errmsg}, '(2(a,i8))') 'Detected size mismatch for variable {var_name}{dim_string} in group {group_name} before {subroutine_name}, expected ', &
+                                           {var_size_expected}, ' but got ', size({var_name}{dim_string})
           ierr = 1
           return
         end if
-'''.format(var_name=local_vars[var_standard_name]['name'], var_size_expected=var_size_expected,
+'''.format(var_name=local_vars[var_standard_name]['name'].replace(dim_string_target_name, ''),
+           dim_string=dim_string,
+           var_size_expected=var_size_expected,
            ccpp_errmsg=CCPP_INTERNAL_VARIABLES[CCPP_ERROR_MSG_VARIABLE], group_name = self.name,
            subroutine_name=subroutine_name)
                         # end if debug
@@ -1275,53 +1525,66 @@ end module {module}
                         # kind_string is used for automated unit conversions, i.e. foo_kind_phys
                         kind_string = '_' + local_vars[var_standard_name]['kind'] if local_vars[var_standard_name]['kind'] else ''
 
+                        # conditional is the conditional allocation, which can be '.true.', '.false.', or any regular Fortran logical expression
+                        conditional=conditionals[var_standard_name]
+
+                        # If the host variable is conditionally allocated, create a pointer for it
+                        if not conditional == '.true.':
+                            # Reuse existing temporary pointer variable, if possible; otherwise add a local pointer (tmpptr)
+                            if local_vars[var_standard_name]['name'] in tmpptrs.keys():
+                                tmpptr = tmpptrs[local_vars[var_standard_name]['name']]
+                            else:
+                                tmpptr_cnt += 1
+                                tmpptr = copy.deepcopy(var)
+                                tmpptr.local_name = '{0}_{1}_ptr'.format(var.local_name, tmpptr_cnt)
+                                tmpptr.pointer = True
+                                tmpptrs[local_vars[var_standard_name]['name']] = tmpptr
+
                         # Convert blocked data in init and finalize steps - only required for variables with block number and horizontal_dimension
                         if ccpp_stage in ['init', 'timestep_init', 'timestep_finalize', 'finalize'] and \
                                 CCPP_INTERNAL_VARIABLES[CCPP_BLOCK_NUMBER] in local_vars[var_standard_name]['name'] and \
                                 '{}:{}'.format(CCPP_CONSTANT_ONE,CCPP_HORIZONTAL_DIMENSION) in var.dimensions:
-                            # Reuse existing temporary variable, if possible
+                            # Reuse existing temporary variable, if possible; otherwise add a local variable (tmpvar)
                             if local_vars[var_standard_name]['name'] in tmpvars.keys():
-                                # If the variable already has a local variable (tmpvar), reuse it
                                 tmpvar = tmpvars[local_vars[var_standard_name]['name']]
                                 actions_in  = tmpvar.actions['in']
                                 actions_out = tmpvar.actions['out']
                             else:
-                                # Add a local variable (tmpvar) for this variable
                                 tmpvar_cnt += 1
                                 tmpvar = copy.deepcopy(var)
-                                tmpvar.local_name = '{0}_local'.format(var.local_name)
-                                #
-                                # Create string for allocating the temporary array by converting the dimensions
-                                # (in standard_name format) to local names as known to the host model
-                                alloc_dimensions = []
-                                for dim in tmpvar.dimensions:
-                                    # This is not supported/implemented: tmpvar would have one dimension less
-                                    # than the original array, and the metadata requesting the variable would
-                                    # not pass the initial test that host model variables and scheme variables
-                                    # have the same rank.
-                                    if dim == CCPP_BLOCK_NUMBER:
-                                        raise Exception("{} cannot be part of the dimensions of variable {}".format(
-                                                                              CCPP_BLOCK_NUMBER, var_standard_name))
+                                tmpvar.local_name = '{0}_{1}_local'.format(var.local_name, tmpvar_cnt)
+
+                            # Create string for allocating the temporary array by converting the dimensions
+                            # (in standard_name format) to local names as known to the host model
+                            alloc_dimensions = []
+                            for dim in tmpvar.dimensions:
+                                # This is not supported/implemented: tmpvar would have one dimension less
+                                # than the original array, and the metadata requesting the variable would
+                                # not pass the initial test that host model variables and scheme variables
+                                # have the same rank.
+                                if dim == CCPP_BLOCK_NUMBER:
+                                    raise Exception("{} cannot be part of the dimensions of variable {}".format(
+                                                                          CCPP_BLOCK_NUMBER, var_standard_name))
+                                else:
+                                    # Handle dimensions like "A:B", "A:3", "-1:Z"
+                                    if ':' in dim:
+                                        dims = [ x.lower() for x in dim.split(':')]
+                                        try:
+                                            dim0 = int(dims[0])
+                                        except ValueError:
+                                            dim0 = metadata_define[dims[0]][0].local_name
+                                        try:
+                                            dim1 = int(dims[1])
+                                        except ValueError:
+                                            dim1 = metadata_define[dims[1]][0].local_name
+                                    # Single dimensions
                                     else:
-                                        # Handle dimensions like "A:B", "A:3", "-1:Z"
-                                        if ':' in dim:
-                                            dims = [ x.lower() for x in dim.split(':')]
-                                            try:
-                                                dim0 = int(dims[0])
-                                            except ValueError:
-                                                dim0 = metadata_define[dims[0]][0].local_name
-                                            try:
-                                                dim1 = int(dims[1])
-                                            except ValueError:
-                                                dim1 = metadata_define[dims[1]][0].local_name
-                                        # Single dimensions
-                                        else:
-                                            dim0 = 1
-                                            try:
-                                                dim1 = int(dim)
-                                            except ValueError:
-                                                dim1 = metadata_define[dim][0].local_name
-                                        alloc_dimensions.append('{}:{}'.format(dim0,dim1))
+                                        dim0 = 1
+                                        try:
+                                            dim1 = int(dim)
+                                        except ValueError:
+                                            dim1 = metadata_define[dim][0].local_name
+                                    alloc_dimensions.append('{}:{}'.format(dim0,dim1))
 
                                 # Padding of additional dimensions - before and after the horizontal dimension
                                 hdim_index = tmpvar.dimensions.index('{}:{}'.format(CCPP_CONSTANT_ONE,CCPP_HORIZONTAL_DIMENSION))
@@ -1332,6 +1595,10 @@ end module {module}
                                 var_defs_manual.append('integer :: ib, nb')
 
                                 # Define actions before. Always copy data in, independent of intent.
+                                # We intentionally omit the dim string for the assignment on the right hand side,
+                                # since it worked without until now, since coding this up together with chunked array
+                                # logic is tricky, and since all this logic will go away after the models transitioned
+                                # to chunked arrays.
                                 actions_in = '''        ! Allocate local variable to copy blocked data {var} into a contiguous array
         allocate({tmpvar}({dims}))
         ib = 1
@@ -1379,6 +1646,13 @@ end module {module}
                                                                             c=var.actions['in'].format(var=tmpvar.local_name,
                                                                                                     kind=kind_string))
 
+                            # If the variable is conditionally allocated, assign pointer
+                            if not conditional == '.true.':
+                                # We don't want the dimstring here - this can lead to dimension mismatches.
+                                # We know for sure that we need to reference the entire de-blocked array anyway.
+                                actions_in += '        {p} => {t}\n'.format(p=f"{tmpptr.local_name}_array({CCPP_INTERNAL_VARIABLES[CCPP_THREAD_NUMBER]})%p",
+                                                                            t=tmpvar.local_name, d=dim_string)
+
                             if var.actions['out']:
                                 # Add unit conversion after returning from the subroutine, before copying the non-blocked
                                 # data back to the blocked data and deallocating the temporary array
@@ -1387,24 +1661,29 @@ end module {module}
                                                                                                         kind=kind_string)) + \
                                                  actions_out
 
+                            # If the variable is conditionally allocated, nullify pointer
+                            if not conditional == '.true.':
+                                actions_out += '        nullify({p})\n'.format(p=f"{tmpptr.local_name}_array({CCPP_INTERNAL_VARIABLES[CCPP_THREAD_NUMBER]})%p")
+
                             # Add the conditionals for the "before" operations
                             actions_before += '''
       if ({conditional}) then
 {actions_in}
       end if
-'''.format(conditional=conditionals[var_standard_name],
-           actions_in=actions_in.rstrip('\n'))
+'''.format(conditional=conditional, actions_in=actions_in.rstrip('\n'))
                             # Add the conditionals for the "after" operations
                             actions_after += '''
       if ({conditional}) then
 {actions_out}
       end if
-'''.format(conditional=conditionals[var_standard_name],
-           actions_out=actions_out.rstrip('\n'))
+'''.format(conditional=conditional, actions_out=actions_out.rstrip('\n'))
 
-                            # Add to argument list if required
-                            if var_standard_name in arguments[scheme_name][subroutine_name]:
+                            # Add to argument list
+                            if conditional == '.true.':
                                 arg = '{local_name}={var_name},'.format(local_name=var.local_name, var_name=tmpvar.local_name)
+                            else:
+                                arg = '{local_name}={ptr_name},'.format(local_name=var.local_name,
+                                                                        ptr_name=f"{tmpptr.local_name}_array({CCPP_INTERNAL_VARIABLES[CCPP_THREAD_NUMBER]})%p")
 
                         # Variables stored in blocked data structures but without horizontal dimension not supported at this time (doesn't make sense anyway)
                         elif ccpp_stage in ['init', 'timestep_init', 'timestep_finalize', 'finalize'] and \
@@ -1434,22 +1713,31 @@ end module {module}
                                 # Add a local variable (tmpvar) for this variable
                                 tmpvar_cnt += 1
                                 tmpvar = copy.deepcopy(var)
-                                tmpvar.local_name = 'tmpvar{0}'.format(tmpvar_cnt)
+                                tmpvar.local_name = 'tmpvar_{0}'.format(tmpvar_cnt)
                                 tmpvars[local_vars[var_standard_name]['name']] = tmpvar
                             if tmpvar.rank:
-                                # Add allocate statement if the variable has a rank > 0
-                                actions_in += '        allocate({t}, source={v})\n'.format(t=tmpvar.local_name,
-                                                                                             v=tmpvar.target)
+                                # Add allocate statement if the variable has a rank > 0 using the dimstring derived above
+                                actions_in += f'        allocate({tmpvar.local_name}{dim_string})\n'
                             if var.actions['in']:
                                 # Add unit conversion before entering the subroutine
-                                actions_in += '        {t} = {c}\n'.format(t=tmpvar.local_name,
-                                                                             c=var.actions['in'].format(var=tmpvar.target,
-                                                                                                        kind=kind_string))
+                                actions_in += '        {t} = {c}{d}\n'.format(t=tmpvar.local_name,
+                                                                              c=var.actions['in'].format(var=tmpvar.target.replace(dim_string_target_name, ''),
+                                                                                                         kind=kind_string),
+                                                                              d=dim_string)
+                                # If the variable is conditionally allocated, assign pointer
+                                if not conditional == '.true.':
+                                    actions_in += '        {p} => {t}{d}\n'.format(p=f"{tmpptr.local_name}_array({CCPP_INTERNAL_VARIABLES[CCPP_THREAD_NUMBER]})%p",
+                                                                                   t=tmpvar.local_name, d=dim_string)
                             if var.actions['out']:
                                 # Add unit conversion after returning from the subroutine
-                                actions_out  += '        {v} = {c}\n'.format(v=tmpvar.target,
-                                                                             c=var.actions['out'].format(var=tmpvar.local_name,
-                                                                                                        kind=kind_string))
+                                actions_out  += '        {v}{d} = {c}\n'.format(v=tmpvar.target.replace(dim_string_target_name, ''),
+                                                                                d=dim_string,
+                                                                                c=var.actions['out'].format(var=tmpvar.local_name,
+                                                                                                            kind=kind_string))
+                                # If the variable is conditionally allocated, nullify pointer
+                                if not conditional == '.true.':
+                                    actions_out += '        nullify({p})\n'.format(p=f"{tmpptr.local_name}_array({CCPP_INTERNAL_VARIABLES[CCPP_THREAD_NUMBER]})%p")
+
                             if tmpvar.rank:
                                 # Add deallocate statement if the variable has a rank > 0
                                 actions_out += '        deallocate({t})\n'.format(t=tmpvar.local_name)
@@ -1459,35 +1747,61 @@ end module {module}
       if ({conditional}) then
 {actions_in}
       end if
-'''.format(conditional=conditionals[var_standard_name],
-           actions_in=actions_in.rstrip('\n'))
+'''.format(conditional=conditional, actions_in=actions_in.rstrip('\n'))
                             # Add the conditionals for the "after" operations
                             actions_after += '''
       if ({conditional}) then
 {actions_out}
       end if
-'''.format(conditional=conditionals[var_standard_name],
-           actions_out=actions_out.rstrip('\n'))
+'''.format(conditional=conditional, actions_out=actions_out.rstrip('\n'))
 
-                            # Add to argument list if required
-                            if var_standard_name in arguments[scheme_name][subroutine_name]:
-                                arg = '{local_name}={var_name},'.format(local_name=var.local_name, var_name=tmpvar.local_name)
+                            # Add to argument list
+                            if conditional == '.true.':
+                                arg = '{local_name}={var_name}{dim_string},'.format(local_name=var.local_name,
+                                    var_name=tmpvar.local_name.replace(dim_string_target_name, ''), dim_string=dim_string)
+                            else:
+                                arg = '{local_name}={ptr_name},'.format(local_name=var.local_name,
+                                                                        ptr_name=f"{tmpptr.local_name}_array({CCPP_INTERNAL_VARIABLES[CCPP_THREAD_NUMBER]})%p")
 
                         # Ordinary variables, no blocked data or unit conversions
                         elif var_standard_name in arguments[scheme_name][subroutine_name]:
                             if debug and assign_test:
                                 actions_in = assign_test
+                            else:
+                                actions_in = ''
+                            actions_out = ''
+                            # If the variable is conditionally allocated, assign pointer
+                            if not conditional == '.true.':
+                                actions_in += '        {p} => {t}{d}\n'.format(p=f"{tmpptr.local_name}_array({CCPP_INTERNAL_VARIABLES[CCPP_THREAD_NUMBER]})%p",
+                                                                               t=var.target.replace(dim_string_target_name, ''),
+                                                                               d=dim_string)
+                            # If the variable is conditionally allocated, nullify pointer
+                            if not conditional == '.true.':
+                                actions_out += '        nullify({p})\n'.format(p=f"{tmpptr.local_name}_array({CCPP_INTERNAL_VARIABLES[CCPP_THREAD_NUMBER]})%p")
+
+                            if actions_in:
                                 # Add the conditionals for the "before" operations
                                 actions_before += '''
       if ({conditional}) then
 {actions_in}
       end if
-'''.format(conditional=conditionals[var_standard_name],
-           actions_in=actions_in.rstrip('\n'))
+'''.format(conditional=conditional, actions_in=actions_in.rstrip('\n'))
+                            if actions_out:
+                                # Add the conditionals for the "after" operations
+                                actions_after += '''
+      if ({conditional}) then
+{actions_out}
+      end if
+'''.format(conditional=conditional, actions_out=actions_out.rstrip('\n'))
 
                             # Add to argument list
-                            arg = '{local_name}={var_name},'.format(local_name=var.local_name, 
-                                                                    var_name=local_vars[var_standard_name]['name'])
+                            if conditional == '.true.':
+                                arg = '{local_name}={var_name}{dim_string},'.format(local_name=var.local_name, 
+                                    var_name=local_vars[var_standard_name]['name'].replace(dim_string_target_name, ''), dim_string=dim_string)
+                            else:
+                                arg = '{local_name}={ptr_name},'.format(local_name=var.local_name,
+                                                                        ptr_name=f"{tmpptr.local_name}_array({CCPP_INTERNAL_VARIABLES[CCPP_THREAD_NUMBER]})%p")
+
                         else:
                             arg = ''
                         args += arg
@@ -1555,9 +1869,18 @@ end module {module}
                 if subcycle_body:
                     body += subcycle_body_prefix + subcycle_body + subcycle_body_suffix
 
+            #For the init stage, for the case when the suite doesn't have any schemes with init phases,
+            #we still need to add the host-supplied ccpp_t variable to the init group caps so that it is
+            #available for setting the initialized flag for the particular instance being called. Otherwise,
+            #the initialized_set_block for the init phase tries to reference the unavailable ccpp_t variable.
+            if (ccpp_stage == 'init' and not self.parents[ccpp_stage]):
+                ccpp_var.intent = 'in'
+                self.parents[ccpp_stage].update({ccpp_var.standard_name:ccpp_var})
+
             # Get list of arguments, module use statement and variable definitions for this subroutine (=stage for the group)
             (self.arguments[ccpp_stage], sub_module_use, sub_var_defs) = create_arguments_module_use_var_defs(
-                                                           self.parents[ccpp_stage], metadata_define, tmpvars.values())
+                                                           self.parents[ccpp_stage], metadata_define,
+                                                           tmpvars.values(), tmpptrs.values())
             sub_argument_list = create_argument_list_wrapped(self.arguments[ccpp_stage])
 
             # Remove duplicates from additional manual variable definitions
@@ -1571,12 +1894,14 @@ end module {module}
             # at least one subroutine that gets called from this group), or skip.
             if self.arguments[ccpp_stage]:
                 initialized_test_block = Group.initialized_test_blocks[ccpp_stage].format(
+                                            ccpp_var_name = ccpp_var.local_name,
                                             target_name_flag=ccpp_error_code_target_name,
                                             target_name_msg=ccpp_error_msg_target_name,
                                             name=self._name)
             else:
                 initialized_test_block = ''
             initialized_set_block = Group.initialized_set_blocks[ccpp_stage].format(
+                                        ccpp_var_name = ccpp_var.local_name,
                                         target_name_flag=ccpp_error_code_target_name,
                                         target_name_msg=ccpp_error_msg_target_name,
                                         name=self._name)
@@ -1612,7 +1937,8 @@ end module {module}
         f.write(Group.header.format(group=self._name,
                                     module=self._module,
                                     module_use=module_use,
-                                    subroutines=', &\n             '.join(self._subroutines)))
+                                    subroutines=', &\n             '.join(self._subroutines),
+                                    num_instances=CCPP_NUM_INSTANCES))
         f.write(local_subs)
         f.write(Group.footer.format(module=self._module))
         if (f is not sys.stdout):

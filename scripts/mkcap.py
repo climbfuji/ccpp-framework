@@ -32,6 +32,8 @@ class Var(object):
         self._kind          = None
         self._intent        = None
         self._active        = None
+        self._optional      = None
+        self._pointer       = False
         self._target        = None
         self._actions       = { 'in' : None, 'out' : None }
         for key, value in kwargs.items():
@@ -95,7 +97,9 @@ class Var(object):
 
     @property
     def rank(self):
-        '''Get the rank of the variable.'''
+        '''Get the rank of the variable. Originally, this was an integer indicating
+        the number of dimensions (therefore the name), now it is a list of colons to use
+        for assumed-size array definitions in Fortran.'''
         if len(self._dimensions) == 0:
             return ''
         else:
@@ -131,6 +135,30 @@ class Var(object):
         if not isinstance(value, str):
             raise ValueError('Invalid value {0} for variable property active, must be a string'.format(value))
         self._active = value
+
+    @property
+    def optional(self):
+        '''Get the optional attribute of the variable.'''
+        return self._optional
+
+    @optional.setter
+    def optional(self, value):
+        if not isinstance(value, str):
+            raise ValueError('Invalid value {0} for variable property optional, must be a string'.format(value))
+        self._optional = value
+
+    # Pointer is not set by parsing metadata attributes, but by mkstatic.
+    # This is a quick and dirty solution!
+    @property
+    def pointer(self):
+        '''Get the pointer attribute of the variable.'''
+        return self._pointer
+
+    @pointer.setter
+    def pointer(self, value):
+        if not isinstance(value, bool):
+            raise ValueError('Invalid value {0} for variable property pointer, must be a logical'.format(value))
+        self._pointer = value
 
     @property
     def target(self):
@@ -206,6 +234,54 @@ class Var(object):
         conversion = function()
         self._actions['in'] = function()
 
+    def dimstring_local_names(self, metadata, assume_shape = False):
+        '''Create the dimension string for assumed shape or explicit arrays
+        in Fortran. Requires a metadata dictionary to resolve the dimensions,
+        which are in CCPP standard names, to local variable names. If the 
+        optional argument assume_shape is True, return an assumed shape
+        dimension string with the upper bound being left undefined.'''
+        # Simplest case: scalars
+        if len(self.dimensions) == 0:
+            return ''
+        dimstring = []
+        # Arrays
+        for dim in self.dimensions:
+            # Handle dimensions like "A:B", "A:3", "-1:Z"
+            if ':' in dim:
+                dims = [ x.lower() for x in dim.split(':')]
+                try:
+                    dim0 = int(dims[0])
+                    dim0 = dims[0]
+                except ValueError:
+                    if not dims[0].lower() in metadata.keys():
+                        raise Exception('Dimension {}, required by variable {}, not defined in metadata'.format(
+                                                                           dims[0].lower(), self.standard_name))
+                    dim0 = metadata[dims[0].lower()][0].local_name
+                try:
+                    dim1 = int(dims[1])
+                    dim1 = dims[1]
+                except ValueError:
+                    if not dims[1].lower() in metadata.keys():
+                        raise Exception('Dimension {}, required by variable {}, not defined in metadata'.format(
+                                                                           dims[1].lower(), self.standard_name))
+                    dim1 = metadata[dims[1].lower()][0].local_name
+            # Single dimensions
+            else:
+                dim0 = 1
+                try:
+                    dim1 = int(dim)
+                    dim1 = dim
+                except ValueError:
+                    if not dim.lower() in metadata.keys():
+                        raise Exception('Dimension {}, required by variable {}, not defined in metadata'.format(
+                                                                               dim.lower(), self.standard_name))
+                    dim1 = metadata[dim.lower()][0].local_name
+            if assume_shape:
+                dimstring.append('{}:'.format(dim0))
+            else:
+                dimstring.append('{}:{}'.format(dim0, dim1))
+        return '({})'.format(','.join(dimstring))
+
     def print_module_use(self):
         '''Print the module use line for the variable.'''
         for item in self.container.split(' '):
@@ -215,63 +291,133 @@ class Var(object):
         str = 'use {module}, only: {varname}'.format(module=module,varname=self.local_name)
         return str
 
-    def print_def_intent(self):
-        '''Print the definition line for the variable, using intent.'''
+    def print_def_intent(self, metadata):
+        '''Print the definition line for the variable, using intent. Use the metadata
+        dictionary to resolve lower bounds for array dimensions.'''
+        # Resolve dimensisons to local names using undefined upper bounds (assumed shape)
+        dimstring = self.dimstring_local_names(metadata, assume_shape = True)
+        # It is an error for host model variables to have the optional attribute in the metadata
+        if self.optional == 'T':
+            error_message = "This routine should only be called for host model variables" + \
+                            " that cannot be optional, but got self.optional=T"
+            raise Exception(error_message)
+        # If the host variable is potentially unallocated, add optional and target to variable declaration
+        elif not self.active == 'T':
+            optional = ', optional, target'
+        else:
+            optional = ''
+        #
         if self.type in STANDARD_VARIABLE_TYPES:
             if self.kind:
-                str = "{s.type}({s._kind}), intent({s.intent}) :: {s.local_name}{s.rank}"
+                str = "{s.type}({s._kind}), intent({s.intent}){optional} :: {s.local_name}{dimstring}"
             else:
-                str = "{s.type}, intent({s.intent}) :: {s.local_name}{s.rank}"
+                str = "{s.type}, intent({s.intent}){optional} :: {s.local_name}{dimstring}"
         else:
             if self.kind:
                 error_message = "Generating variable definition statements for derived types with" + \
                                 " kind attributes not implemented; variable: {0}".format(self.standard_name)
                 raise Exception(error_message)
             else:
-                str = "type({s.type}), intent({s.intent}) :: {s.local_name}{s.rank}"
-        return str.format(s=self)
+                str = "type({s.type}), intent({s.intent}){optional} :: {s.local_name}{dimstring}"
+        return str.format(s=self, optional=optional, dimstring=dimstring)
 
-    def print_def_local(self):
+    def print_def_local(self, metadata):
         '''Print the definition line for the variable, assuming it is a local variable.'''
-        if self.type in STANDARD_VARIABLE_TYPES:
-            if self.kind:
-                if self.rank:
-                    str = "{s.type}({s._kind}), dimension{s.rank}, allocatable :: {s.local_name}"
+        # It is an error for local variables to have the active attribute
+        if not self.active == 'T':
+            error_message = "This routine should only be called for local variables" + \
+                            " that cannot have an active attribute other than the" +\
+                            " default T, but got self.active=T"
+            raise Exception(error_message)
+
+        # If it is a pointer, everything is different!
+        if self.pointer:
+            if self.type in STANDARD_VARIABLE_TYPES:
+                if self.kind:
+                    if self.rank:
+                        str = "{s.type}({s._kind}), dimension{s.rank}, pointer :: p => null()"
+                    else:
+                        str = "{s.type}({s._kind}), pointer :: p => null()"
                 else:
-                    str = "{s.type}({s._kind}) :: {s.local_name}"
+                    if self.rank:
+                        str = "{s.type}, dimension{s.rank}, pointer :: p => null()"
+                    else:
+                        str = "{s.type}, pointer :: p => null()"
             else:
-                if self.rank:
-                    str = "{s.type}, dimension{s.rank}, allocatable :: {s.local_name}"
+                if self.kind:
+                    error_message = "Generating variable definition statements for derived types with" + \
+                                    " kind attributes not implemented; variable: {0}".format(self.standard_name)
+                    raise Exception(error_message)
                 else:
-                    str = "{s.type} :: {s.local_name}"
+                    if self.rank:
+                        str = "type({s.type}), dimension{s.rank}, pointer :: p => null()"
+                    else:
+                        str = "type({s.type}), pointer :: p => null()"
+            return str.format(s=self)
         else:
-            if self.kind:
-                error_message = "Generating variable definition statements for derived types with" + \
-                                " kind attributes not implemented; variable: {0}".format(self.standard_name)
-                raise Exception(error_message)
+            # If the host variable is potentially unallocated, the active attribute is
+            # also set accordingly for the local variable; add target to variable declaration
+            if self.optional == 'T':
+                target = ', target'
             else:
-                if self.rank:
-                    str = "type({s.type}), dimension{s.rank}, allocatable :: {s.local_name}"
+                target = ''
+            if self.type in STANDARD_VARIABLE_TYPES:
+                if self.kind:
+                    if self.rank:
+                        str = "{s.type}({s._kind}), dimension{s.rank}, allocatable{target} :: {s.local_name}"
+                    else:
+                        str = "{s.type}({s._kind}){target} :: {s.local_name}"
                 else:
-                    str = "type({s.type}) :: {s.local_name}"
-        return str.format(s=self)
+                    if self.rank:
+                        str = "{s.type}, dimension{s.rank}, allocatable{target} :: {s.local_name}"
+                    else:
+                        str = "{s.type}{target} :: {s.local_name}"
+            else:
+                if self.kind:
+                    error_message = "Generating variable definition statements for derived types with" + \
+                                    " kind attributes not implemented; variable: {0}".format(self.standard_name)
+                    raise Exception(error_message)
+                else:
+                    if self.rank:
+                        str = "type({s.type}), dimension{s.rank}, allocatable{target} :: {s.local_name}"
+                    else:
+                        str = "type({s.type}){target} :: {s.local_name}"
+            return str.format(s=self, target=target)
 
     def print_debug(self):
         '''Print the data retrieval line for the variable.'''
-        str='''Contents of {s} (* = mandatory for compatibility):
-        standard_name = {s.standard_name} *
-        long_name     = {s.long_name}
-        units         = {s.units} *
-        local_name    = {s.local_name}
-        type          = {s.type} *
-        dimensions    = {s.dimensions}
-        rank          = {s.rank} *
-        kind          = {s.kind} *
-        intent        = {s.intent}
-        active        = {s.active}
-        target        = {s.target}
-        container     = {s.container}
-        actions       = {s.actions}'''
+        # Scheme variables don't have the active attribute
+        if 'SCHEME' in self.container:
+            str='''Contents of {s} (* = mandatory for compatibility):
+            standard_name = {s.standard_name} *
+            long_name     = {s.long_name}
+            units         = {s.units} *
+            local_name    = {s.local_name}
+            type          = {s.type} *
+            dimensions    = {s.dimensions}
+            rank          = {s.rank} *
+            kind          = {s.kind} *
+            intent        = {s.intent}
+            optional      = {s.optional}
+            target        = {s.target}
+            container     = {s.container}
+            actions       = {s.actions}'''
+        # Host model variables don't have the optional attribute
+        else:
+            str='''Contents of {s} (* = mandatory for compatibility):
+            standard_name = {s.standard_name} *
+            long_name     = {s.long_name}
+            units         = {s.units} *
+            local_name    = {s.local_name}
+            type          = {s.type} *
+            dimensions    = {s.dimensions}
+            rank          = {s.rank} *
+            kind          = {s.kind} *
+            intent        = {s.intent}
+            active        = {s.active}
+            target        = {s.target}
+            container     = {s.container}
+            actions       = {s.actions}'''
         return str.format(s=self)
 
 class CapsMakefile(object):
