@@ -11,6 +11,7 @@ MODULE cld_ice
    PUBLIC :: cld_ice_init
    PUBLIC :: cld_ice_run
    PUBLIC :: cld_ice_final
+   PUBLIC :: cld_ice_dynamic_constituents
 
    real(kind_phys), private :: tcld = HUGE(1.0_kind_phys)
 
@@ -19,7 +20,7 @@ CONTAINS
    !> \section arg_table_cld_ice_run  Argument Table
    !! \htmlinclude arg_table_cld_ice_run.html
    !!
-   subroutine cld_ice_run(ncol, timestep, temp, qv, ps, cld_ice,              &
+   subroutine cld_ice_run(ncol, timestep, temp, qv, ps, cld_ice_array,              &
         errmsg, errflg)
 
       integer,            intent(in)    :: ncol
@@ -27,7 +28,7 @@ CONTAINS
       real(kind_phys),    intent(inout) :: temp(:,:)
       real(kind_phys),    intent(inout) :: qv(:,:)
       real(kind_phys),    intent(in)    :: ps(:)
-      REAL(kind_phys),    intent(inout) :: cld_ice(:,:)
+      REAL(kind_phys),    intent(inout) :: cld_ice_array(:,:)
       character(len=512), intent(out)   :: errmsg
       integer,            intent(out)   :: errflg
       !----------------------------------------------------------------
@@ -44,7 +45,7 @@ CONTAINS
          do ilev = 1, size(temp, 2)
             if (temp(icol, ilev) < tcld) then
                frz = MAX(qv(icol, ilev) - 0.5_kind_phys, 0.0_kind_phys)
-               cld_ice(icol, ilev) = cld_ice(icol, ilev) + frz
+               cld_ice_array(icol, ilev) = cld_ice_array(icol, ilev) + frz
                qv(icol, ilev) = qv(icol, ilev) - frz
                if (frz > 0.0_kind_phys) then
                   temp(icol, ilev) = temp(icol, ilev) + 1.0_kind_phys
@@ -58,16 +59,16 @@ CONTAINS
    !> \section arg_table_cld_ice_init  Argument Table
    !! \htmlinclude arg_table_cld_ice_init.html
    !!
-   subroutine cld_ice_init(tfreeze, cld_ice, errmsg, errflg)
+   subroutine cld_ice_init(tfreeze, cld_ice_array, errmsg, errflg)
 
       real(kind_phys),    intent(in)    :: tfreeze
-      real(kind_phys),    intent(inout) :: cld_ice(:,:)
+      real(kind_phys),    intent(inout) :: cld_ice_array(:,:)
       character(len=512), intent(out)   :: errmsg
       integer,            intent(out)   :: errflg
 
       errmsg = ''
       errflg = 0
-      cld_ice = 0.0_kind_phys
+      cld_ice_array = 0.0_kind_phys
       tcld = tfreeze - 20.0_kind_phys
 
    end subroutine cld_ice_init
@@ -91,6 +92,32 @@ CONTAINS
       errflg = 0
 
    end subroutine cld_ice_final
+
+   subroutine cld_ice_dynamic_constituents(dyn_const, errcode, errmsg)
+      use ccpp_constituent_prop_mod, only: ccpp_constituent_properties_t
+      type(ccpp_constituent_properties_t), allocatable, intent(out) :: dyn_const(:)
+      integer,                             intent(out) :: errcode
+      character(len=512),                  intent(out) :: errmsg
+
+      errmsg = ''
+      errcode = 0
+      allocate(dyn_const(2), stat=errcode)
+      if (errcode /= 0) then
+         errmsg = 'Error allocating dyn_const in cld_ice_dynamic_constituents'
+      end if
+      call dyn_const(1)%instantiate(std_name='dyn_const1', long_name='dyn const1', &
+           units='kg kg-1', default_value=0._kind_phys,                            &
+           vertical_dim='vertical_layer_dimension', advected=.true.,               &
+           min_value=1000._kind_phys, errcode=errcode, errmsg=errmsg)
+      if (errcode /= 0) then
+         return
+      end if
+      call dyn_const(2)%instantiate(std_name='dyn_const2_wrt_moist_air', long_name='dyn const2', &
+           units='kg kg-1', default_value=0._kind_phys,                            &
+           vertical_dim='vertical_layer_dimension', advected=.true.,               &
+           errcode=errcode, errmsg=errmsg)
+
+   end subroutine cld_ice_dynamic_constituents
    !! @}
    !! @}
 
