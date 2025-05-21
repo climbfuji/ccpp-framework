@@ -1,0 +1,85 @@
+name: ccpp-prebuild
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - release/*
+      - neptune
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  unit-tests:
+
+    runs-on: ['self-hosted','neptune-org-atlantis']
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Create Python virtual environment
+      run: |
+        module use ${PWD}/modulefiles
+        module load atlantis/llvm-20.1.5
+        python3 -m venv venv
+        source venv/bin/activate
+        python3 -m pip install flake8 pytest pylint
+        if [ -f requirements.txt ]; then
+          python3 -m pip  install -r requirements.txt
+        fi
+        deactivate
+    - name: ccpp-prebuild unit tests
+      run: |
+        module use ${PWD}/modulefiles
+        module load atlantis/llvm-20.1.5
+        source venv/bin/activate
+        export PYTHONPATH=$(pwd)/scripts:$(pwd)/scripts/parse_tools:${PYTHONPATH}
+        cd test_prebuild
+        pytest
+        deactivate
+    - name: ccpp-prebuild blocked data tests
+      run: |
+        module use ${PWD}/modulefiles
+        module load atlantis/llvm-20.1.5
+        cd test_prebuild/test_blocked_data
+        python3 ../../scripts/ccpp_prebuild.py --config=ccpp_prebuild_config.py --builddir=build
+        cd build
+        cmake ..
+        make
+        ./test_blocked_data.x
+    - name: ccpp-prebuild chunked data tests
+      run: |
+        module use ${PWD}/modulefiles
+        module load atlantis/llvm-20.1.5
+        cd test_prebuild/test_chunked_data
+        python3 ../../scripts/ccpp_prebuild.py --config=ccpp_prebuild_config.py --builddir=build
+        cd build
+        cmake ..
+        make
+        ./test_chunked_data.x
+    - name: ccpp-prebuild optional arguments tests
+      run: |
+        module use ${PWD}/modulefiles
+        module load atlantis/llvm-20.1.5
+        cd test_prebuild/test_opt_arg
+        python3 ../../scripts/ccpp_prebuild.py --config=ccpp_prebuild_config.py --builddir=build
+        cd build
+        cmake ..
+        make
+        ./test_opt_arg.x
+    - name: ccpp-prebuild unit conversion tests
+      run: |
+        module use ${PWD}/modulefiles
+        module load atlantis/llvm-20.1.5
+        cd test_prebuild/test_unit_conv
+        python3 ../../scripts/ccpp_prebuild.py --config=ccpp_prebuild_config.py --builddir=build
+        cd build
+        cmake ..
+        make
+        ./test_unit_conv.x

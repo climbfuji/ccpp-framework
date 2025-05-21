@@ -1,0 +1,25 @@
+#%Module
+#
+# neptune-atmos wrapper module
+#
+
+proc ModulesHelp {} {
+    puts -nonewline stderr "Load neptune-atmos environment on Atlantis for spack-stack with clang-20.1.5"
+}
+
+module-whatis "neptune-atmos environment"
+
+# conflicts
+conflict atlantis
+
+# Prerequisite modules
+prepend-path MODULEPATH /gpfs/neptune/spack-stack/llvm-20.1.5/modulefiles
+prepend-path MODULEPATH /gpfs/neptune/spack-stack/openmpi-5.0.6/llvm-20.1.5/modulefiles
+module load slurm
+
+# spack-stack modules
+prepend-path MODULEPATH /gpfs/neptune/spack-stack/spack-stack-llvm-pre-20250520/envs/ne-clang-20.1.5/install/modulefiles/Core
+module load stack-clang/20.1.5
+module load stack-openmpi/5.0.6
+module load stack-python/3.11.11
+module load cmake/3.31.6
