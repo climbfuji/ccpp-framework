@@ -23,10 +23,36 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Build the framework
+      run: |
+        module use ${PWD}/modulefiles
+        module load atlantis/llvm-20.1.5
+        cmake -S. -B./build -DOPENMP=ON -DCCPP_FRAMEWORK_ENABLE_TESTS=ON
+        cd build
+        make
+
     - name: Run unit tests
       run: |
         module use ${PWD}/modulefiles
         module load atlantis/llvm-20.1.5
-        cd test
-        ./run_fortran_tests.sh
+        cd build
+        ctest --rerun-failed --output-on-failure . --verbose
 
+    - name: Run python tests
+      run: |
+        module use ${PWD}/modulefiles
+        module load atlantis/llvm-20.1.5
+        BUILD_DIR=./build \
+        PYTHONPATH=test/:scripts/ \
+            pytest \
+              test/capgen_test/capgen_test_reports.py \
+              test/advection_test/advection_test_reports.py \
+              test/ddthost_test/ddthost_test_reports.py \
+              test/var_compatibility_test/var_compatibility_test_reports.py
+
+    - name: Run Fortran to metadata test
+      run: |
+        module use ${PWD}/modulefiles
+        module load atlantis/llvm-20.1.5
+        cd test && ./test_fortran_to_metadata.sh
