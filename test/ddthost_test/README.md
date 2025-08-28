@@ -1,6 +1,16 @@
-ccpp_capgen test
-===========
+# DDT Host Test
 
-To build and run the ccpp_capgen test, run ./run_test
-This script will build and run the test.
-The exit code is zero (0) on PASS and non-zero on FAIL.
+Contains tests to exercise more DDT functionality:
+- Passing around and modifying a DDT
+- Making DDT in host model & using it in CCPP-ized physics code
+
+## Building/Running
+
+To explicitly build/run the ddt test host, run:
+
+```bash
+$ cmake -S<path_to_project_root> -B<path_to_build> -DCCPP_RUN_DDT_HOST_TEST=ON
+$ cd <path_to_build>
+$ make
+$ ctest
+```

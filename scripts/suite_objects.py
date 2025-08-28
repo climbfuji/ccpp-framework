@@ -142,7 +142,7 @@ class CallList(VarDictionary):
                         raise CCPPError(errmsg.format(stdname, clnames))
                     # end if
                     lname = dvar.get_prop_value('local_name')
-                    # Optional variables in the caps are associated with 
+                    # Optional variables in the caps are associated with
                     # local pointers of <lname>_ptr
                     if dvar.get_prop_value('optional'):
                         lname = dummy+'_ptr'
@@ -1161,7 +1161,7 @@ class Scheme(SuiteObject):
                     gvar = None
                 # end if
             if gvar is None:
-                my_group.add_call_list_variable(var)
+                my_group.add_call_list_variable(var, gen_unique=True)
             # end if
         # end if
 
@@ -1219,7 +1219,7 @@ class Scheme(SuiteObject):
                 # end if
                 # We have a match, make sure var is in call list
                 if new_dims == vdims:
-                    self.add_call_list_variable(var, exists_ok=True)
+                    self.add_call_list_variable(var, exists_ok=True, gen_unique=True)
                     self.update_group_call_list_variable(var)
                 else:
                     subst_dict = {'dimensions':new_dims}
@@ -1360,18 +1360,32 @@ class Scheme(SuiteObject):
                 if not ':' in dim:
                     dim_var = self.find_variable(standard_name=dim)
                     if not dim_var:
-                        raise Exception(f"No dimension with standard name '{dim}'")
-                    self.update_group_call_list_variable(dim_var)
+                        # To allow for numerical dimensions in metadata.
+                        if not dim.isnumeric():
+                            raise Exception(f"No dimension with standard name '{dim}'")
+                        # end if
+                    else:
+                        self.update_group_call_list_variable(dim_var)
+                    # end if
                 else:
                     (ldim, udim) = dim.split(":")
                     ldim_var = self.find_variable(standard_name=ldim)
                     if not ldim_var:
-                        raise Exception(f"No dimension with standard name '{ldim}'")
+                        # To allow for numerical dimensions in metadata.
+                        if not ldim.isnumeric():
+                            raise Exception(f"No dimension with standard name '{ldim}'")
+                        # end if
+                    # end if
                     self.update_group_call_list_variable(ldim_var)
                     udim_var = self.find_variable(standard_name=udim)
                     if not udim_var:
-                        raise Exception(f"No dimension with standard name '{udim}'")
-                    self.update_group_call_list_variable(udim_var)
+                        # To allow for numerical dimensions in metadata.
+                        if not udim.isnumeric():
+                            raise Exception(f"No dimension with standard name '{udim}'")
+                        # end if
+                    else:
+                        self.update_group_call_list_variable(udim_var)
+                    # end if
 
         # Add the variable to the list of variables to check. Record which internal_var to use.
         self.__var_debug_checks.append([var, internal_var])
@@ -1436,6 +1450,7 @@ class Scheme(SuiteObject):
         dimensions = var.get_dimensions()
         active = var.get_prop_value('active')
         allocatable = var.get_prop_value('allocatable')
+        vtype = var.get_prop_value('type')
 
         # Need the local name from the group call list,
         # from the locally-defined variables of the group,
@@ -1461,7 +1476,7 @@ class Scheme(SuiteObject):
         local_name = dvar.get_prop_value('local_name')
 
         # If the variable is allocatable and the intent for the scheme is 'out',
-        # then we can't test anything because the scheme is going to allocate 
+        # then we can't test anything because the scheme is going to allocate
         # the variable. We don't have this information earlier in
         # add_var_debug_check, therefore need to back out here,
         # using the information from the scheme variable (call list).
@@ -1496,6 +1511,8 @@ class Scheme(SuiteObject):
             dim_strings = []
             lbound_strings = []
             ubound_strings = []
+            dim_lengths = []
+            local_names = []
             for dim in dimensions:
                 if not ':' in dim:
                     # In capgen, any true dimension (that is not a single index) does
@@ -1524,18 +1541,30 @@ class Scheme(SuiteObject):
                         for var_dict in cldicts:
                             dvar = var_dict.find_variable(standard_name=ldim, any_scope=False)
                             if dvar is not None:
+                                ldim_lname = dvar.get_prop_value('local_name')
                                 break
                         if not dvar:
-                            raise Exception(f"No variable with standard name '{ldim}' in cldicts")
-                        ldim_lname = dvar.get_prop_value('local_name')
+                            # To allow for numerical dimensions in metadata.
+                            if ldim.isnumeric():
+                                ldim_lname = ldim
+                            else:
+                                raise Exception(f"No variable with standard name '{ldim}' in cldicts")
+                            # endif
+                        # endif
                         # Get dimension for upper bound
                         for var_dict in cldicts:
                             dvar = var_dict.find_variable(standard_name=udim, any_scope=False)
                             if dvar is not None:
+                                udim_lname = dvar.get_prop_value('local_name')
                                 break
                         if not dvar:
-                            raise Exception(f"No variable with standard name '{udim}' in cldicts")
-                        udim_lname = dvar.get_prop_value('local_name')
+                            # To allow for numerical dimensions in metadata.
+                            if udim.isnumeric():
+                                udim_lname = udim
+                            else:
+                                raise Exception(f"No variable with standard name '{udim}' in cldicts")
+                            # end if
+                        # end if
                         # Assemble dimensions and bounds for size checking
                         dim_length = f'{udim_lname}-{ldim_lname}+1'
                         dim_string = ":"
@@ -1546,7 +1575,9 @@ class Scheme(SuiteObject):
                     lbound_strings.append(lbound_string)
                     ubound_strings.append(ubound_string)
                 array_size = f'{array_size}*({dim_length})'
-
+                dim_lengths.append(dim_length)
+                local_names.append(local_name)
+            # end for
             # Various strings needed to get the right size
             # and lower/upper bound of the array
             dim_string = '(' + ','.join(dim_strings) + ')'
@@ -1554,38 +1585,70 @@ class Scheme(SuiteObject):
             ubound_string = '(' + ','.join(ubound_strings) + ')'
 
             # Write size check
-            tmp_indent = indent
-            if conditional != '.true.':
-                tmp_indent = indent + 1
-                outfile.write(f"if {conditional} then", indent)
-            # end if
-            outfile.write(f"! Check size of array {local_name}", tmp_indent)
-            outfile.write(f"if (size({local_name}{dim_string}) /= {array_size}) then", tmp_indent)
-            outfile.write(f"write({errmsg}, '(a)') 'In group {self.__group.name} before {self.__subroutine_name}:'", tmp_indent+1)
-            outfile.write(f"write({errmsg}, '(2(a,i8))') 'for array {local_name}, expected size ', {array_size}, ' but got ', size({local_name})", tmp_indent+1)
-            outfile.write(f"{errcode} = 1", tmp_indent+1)
-            outfile.write(f"return", tmp_indent+1)
-            outfile.write(f"end if", tmp_indent)
-            if conditional != '.true.':
-                outfile.write(f"end if", indent)
-            # end if
-            outfile.write('',indent)
-
-            # Assign lower/upper bounds to internal_var (scalar) if intent is not out
-            if not intent == 'out':
-                internal_var_lname = internal_var.get_prop_value('local_name')
+            # - Only for types int and real.
+            if (vtype == "integer") or (vtype == "real"):
                 tmp_indent = indent
                 if conditional != '.true.':
                     tmp_indent = indent + 1
                     outfile.write(f"if {conditional} then", indent)
                 # end if
-                outfile.write(f"! Assign lower/upper bounds of {local_name} to {internal_var_lname}", tmp_indent)
-                outfile.write(f"{internal_var_lname} = {local_name}{lbound_string}", tmp_indent)
-                outfile.write(f"{internal_var_lname} = {local_name}{ubound_string}", tmp_indent)
+                outfile.write(f"! Check size of array {local_name}", tmp_indent)
+                outfile.write(f"if (size({local_name}{dim_string}) /= {array_size}) then", tmp_indent)
+                outfile.write(f"write({errmsg}, '(2(a,i8))') 'In group {self.__group.name} before  "\
+                              f"{self.__subroutine_name}: for array {local_name}, expected size ', "\
+                              f"{array_size}, ' but got ', size({local_name})", tmp_indent+1)
+                outfile.write(f"{errcode} = 1", tmp_indent+1)
+                outfile.write(f"return", tmp_indent+1)
+                outfile.write(f"end if", tmp_indent)
                 if conditional != '.true.':
                     outfile.write(f"end if", indent)
                 # end if
                 outfile.write('',indent)
+            # end if
+
+            # Write size check for each dimension in array.
+            #  - If intent is not out.
+            #  - Only for types int and real.
+            if (vtype == "integer") or (vtype == "real"):
+                if not intent == 'out':
+                    tmp_indent = indent
+                    if conditional != '.true.':
+                        tmp_indent = indent + 1
+                        outfile.write(f"if {conditional} then", indent)
+                    # end if
+                    ndims = len(dim_lengths)
+
+                    # Loop through dimensions in var and check if length of each dimension
+                    # is the correct size. Skip for 1D variables.
+                    if (ndims > 1):
+                        for index, dim_length in enumerate(dim_lengths):
+                            array_ref = '('
+                            # Dimension(s) before current rank to be checked.
+                            array_ref += '1,'*(index)
+                            # Dimension to check.
+                            array_ref += dim_strings[index]
+                            # Dimension(s) after current rank to be checked.
+                            array_ref += ',1'*(ndims-(index+1))
+                            array_ref += ')'
+                            #
+                            outfile.write(f"! Check length of {local_names[index]}{array_ref}", tmp_indent)
+                            outfile.write(f"if (size({local_names[index]}{array_ref}) /= {dim_length}) then ",    \
+                                          tmp_indent)
+                            outfile.write(f"write({errmsg}, '(2(a,i8))') 'In group {self.__group.name} before "   \
+                                          f"{self.__subroutine_name}: for array {local_names[index]}{array_ref}, "\
+                                          f"expected size ', {dim_length}, ' but got ', "                         \
+                                          f"size({local_names[index]}{array_ref})", tmp_indent+1)
+                            outfile.write(f"{errcode} = 1", tmp_indent+1)
+                            outfile.write(f"return", tmp_indent+1)
+                            outfile.write(f"end if", tmp_indent)
+                        # end for
+                    #end if
+                    if conditional != '.true.':
+                        outfile.write(f"end if", indent)
+                    # end if
+                    outfile.write('',indent)
+                # endif
+            # end if
 
     def associate_optional_var(self, dict_var, var, var_ptr, has_transform, cldicts, indent, outfile):
         """Write local pointer association for optional variables."""
@@ -1794,11 +1857,11 @@ class Scheme(SuiteObject):
         #
         if self.__optional_vars:
             outfile.write('! Associate conditional variables', indent+1)
-        # end if 
+        # end if
         for (dict_var, var, var_ptr, has_transform) in self.__optional_vars:
             tstmt = self.associate_optional_var(dict_var, var, var_ptr, has_transform, cldicts, indent+1, outfile)
         # end for
-        # 
+        #
         # Write the scheme call.
         #
         if self._has_run_phase:
@@ -1813,7 +1876,7 @@ class Scheme(SuiteObject):
         #
         first_ptr_declaration=True
         for (dict_var, var, var_ptr, has_transform) in self.__optional_vars:
-            if first_ptr_declaration: 
+            if first_ptr_declaration:
                 outfile.write('! Copy any local pointers to dummy/local variables', indent+1)
                 first_ptr_declaration=False
             # end if
@@ -1977,23 +2040,29 @@ class Subcycle(SuiteObject):
     """Class to represent a subcycled group of schemes or scheme collections"""
 
     def __init__(self, sub_xml, context, parent, run_env):
-        name = sub_xml.get('name', None) # Iteration count
-        loop_extent = sub_xml.get('loop', "1") # Number of iterations
+        self._loop_extent = sub_xml.get('loop', "1") # Number of iterations
+        self._loop = None
         # See if our loop variable is an interger or a variable
         try:
-            loop_int = int(loop_extent) # pylint: disable=unused-variable
-            self._loop = loop_extent
+            _ = int(self._loop_extent)
+            self._loop = self._loop_extent
             self._loop_var_int = True
+            name = f"loop{self._loop}"
+            super().__init__(name, context, parent, run_env, active_call_list=False)
         except ValueError:
             self._loop_var_int = False
-            lvar = parent.find_variable(standard_name=self.loop, any_scope=True)
+            lvar = parent.find_variable(standard_name=self._loop_extent, any_scope=True)
             if lvar is None:
-                emsg = "Subcycle, {}, specifies {} iterations but {} not found"
-                raise CCPPError(emsg.format(name, self.loop, self.loop))
+                emsg = "Subcycle, {}, specifies {} iterations, variable not found"
+                raise CCPPError(emsg.format(name, self._loop_extent))
+            else:
+                self._loop_var_int = False
+                self._loop = lvar.get_prop_value('local_name')
             # end if
+            name = f"loop_{self._loop_extent}"[0:63]
+            super().__init__(name, context, parent, run_env, active_call_list=True)
             parent.add_call_list_variable(lvar)
         # end try
-        super().__init__(name, context, parent, run_env)
         for item in sub_xml:
             new_item = new_suite_object(item, context, self, run_env)
             self.add_part(new_item)
@@ -2004,12 +2073,11 @@ class Subcycle(SuiteObject):
         if self.name is None:
             self.name = "subcycle_index{}".format(level)
         # end if
-        # Create a variable for the loop index
-        self.add_variable(Var({'local_name':self.name,
-                               'standard_name':'loop_variable',
-                               'type':'integer', 'units':'count',
-                               'dimensions':'()'}, _API_SOURCE, self.run_env),
-                          self.run_env)
+        # Create a Group variable for the subcycle index.
+        newvar = Var({'local_name':self.name, 'standard_name':self.name,
+                      'type':'integer', 'units':'count', 'dimensions':'()'},
+                     _API_LOCAL, self.run_env)
+        group.manage_variable(newvar)
         # Handle all the suite objects inside of this subcycle
         scheme_mods = set()
         for item in self.parts:
@@ -2023,7 +2091,7 @@ class Subcycle(SuiteObject):
 
     def write(self, outfile, errcode, errmsg, indent):
         """Write code for the subcycle loop, including contents, to <outfile>"""
-        outfile.write('do {} = 1, {}'.format(self.name, self.loop), indent)
+        outfile.write('do {} = 1, {}'.format(self.name, self._loop), indent)
         # Note that 'scheme' may be a sybcycle or other construct
         for item in self.parts:
             item.write(outfile, errcode, errmsg, indent+1)
@@ -2033,13 +2101,7 @@ class Subcycle(SuiteObject):
     @property
     def loop(self):
         """Return the loop value or variable local_name"""
-        lvar = self.find_variable(standard_name=self.loop, any_scope=True)
-        if lvar is None:
-            emsg = "Subcycle, {}, specifies {} iterations but {} not found"
-            raise CCPPError(emsg.format(self.name, self.loop, self.loop))
-        # end if
-        lname = lvar.get_prop_value('local_name')
-        return lname
+        return self._loop
 
 ###############################################################################
 
@@ -2273,7 +2335,7 @@ class Group(SuiteObject):
                         ParseSource(_API_SOURCE_NAME,
                                     _API_LOCAL_VAR_NAME, newvar.context),
                         self.run_env)
-        self.add_variable(local_var, self.run_env, exists_ok=True)
+        self.add_variable(local_var, self.run_env, exists_ok=True, gen_unique=True)
         # Finally, make sure all dimensions are accounted for
         emsg = self.add_variable_dimensions(local_var, _API_LOCAL_VAR_TYPES,
                                             adjust_intent=True,
@@ -2408,8 +2470,8 @@ class Group(SuiteObject):
                     # end if
                 # end if
             # end for
-            # All optional dummy variables within group need to have 
-            # an associated pointer array declared. 
+            # All optional dummy variables within group need to have
+            # an associated pointer array declared.
             for cvar in self.call_list.variable_list():
                 opt_var = cvar.get_prop_value('optional')
                 if opt_var:
@@ -2483,12 +2545,11 @@ class Group(SuiteObject):
         # end for
         # Look for any DDT types
         call_vars = self.call_list.variable_list()
-        self._ddt_library.write_ddt_use_statements(call_vars, outfile,
-                                                   indent+1, pad=modmax)
-        decl_vars = ([x[0] for x in subpart_allocate_vars.values()] +
+        all_vars = ([x[0] for x in subpart_allocate_vars.values()] +
                      [x[0] for x in subpart_scalar_vars.values()] +
                      [x[0] for x in subpart_optional_vars.values()])
-        self._ddt_library.write_ddt_use_statements(decl_vars, outfile,
+        all_vars.extend(call_vars)
+        self._ddt_library.write_ddt_use_statements(all_vars, outfile,
                                                    indent+1, pad=modmax)
         outfile.write('', 0)
         # Write out dummy arguments

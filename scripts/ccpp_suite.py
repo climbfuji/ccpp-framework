@@ -426,15 +426,15 @@ character(len=16) :: {css_var_name} = '{state}'
         self.__ddt_library = ddt_library
         # Collect all relevant schemes
         # For all groups, find associated init and final methods
-        scheme_set = set()
+        scheme_list = list()
         for group in self.groups:
             for scheme in group.schemes():
-                scheme_set.add(scheme.name)
+                scheme_list.append(scheme.name)
             # end for
         # end for
         no_scheme_entries = {} # Skip schemes that are not in this suite
-        for module in scheme_library:
-            if module in scheme_set:
+        for module in scheme_list:
+            if scheme_library[module]:
                 scheme_entries = scheme_library[module]
             else:
                 scheme_entries = no_scheme_entries
@@ -658,8 +658,13 @@ class API(VarDictionary):
                                     run_env, ddts=all_ddts)
         for header in [d for d in scheme_headers if d.header_type != 'ddt']:
             if header.header_type != 'scheme':
-                errmsg = "{} is an unknown CCPP API metadata header type, {}"
-                raise CCPPError(errmsg.format(header.title, header.header_type))
+                if header.header_type == 'module':
+                    errmsg = f"{header.title} is a module metadata header type."
+                    errmsg+=" This is not an allowed CCPP scheme header type."
+                else:
+                    errmsg = f"{header.title} is an unknown CCPP API metadata header type, {header.header_type}"
+                # end if
+                raise CCPPError(errmsg)
             # end if
             func_id, _, match_trans =                                         \
                 CCPP_STATE_MACH.function_match(header.title)
@@ -773,7 +778,7 @@ class API(VarDictionary):
         if add_allocate:
             ofile.write(f"allocate({varlist_name}({len(var_list)}))", indent)
         # end if
-        for ind, var in enumerate(sorted(var_list)):
+        for ind, var in enumerate(var_list):
             if start_var:
                 ind_str = f"{start_var} + {ind + start_index}"
             else:

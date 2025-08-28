@@ -12,7 +12,7 @@
 [ vmr_array ]
   standard_name = array_of_volume_mixing_ratios
   units = ppmv
-  dimensions = (horizontal_loop_extent, number_of_chemical_species)
+  dimensions = (horizontal_dimension, number_of_chemical_species)
   type = real
   kind = kind_phys
 [ccpp-table-properties]
@@ -74,6 +74,11 @@
   standard_name = horizontal_dimension
   type = integer
   units = count
+  dimensions = ()
+  intent = in
+[ ccpp_info ]
+  standard_name = host_standard_ccpp_type
+  type = ccpp_info_t
   dimensions = ()
   intent = in
 [ vmr ]

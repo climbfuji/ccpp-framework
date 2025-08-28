@@ -27,7 +27,10 @@ contains
     call allocate_physics_state(ncols, pver, phys_state, has_graupel, has_ice)
     phys_state%effrr = 1.0E-3 ! 1000 microns, in meter
     phys_state%effrl = 1.0E-4 ! 100 microns, in meter
-    phys_state%scalar_var = 1.0 ! in m
+    phys_state%scalar_var  = 1.0 ! in m
+    phys_state%scalar_varA = 273.15 ! in K
+    phys_state%scalar_varB = 1013.0 ! in mb
+    phys_state%scalar_varC = 380    ! in ppmv
     effrs            = 5.0E-4 ! 500 microns, in meter
     if (has_graupel) then
        phys_state%effrg = 2.5E-4 ! 250 microns, in meter
@@ -37,6 +40,8 @@ contains
        phys_state%effri = 5.0E-5 ! 50 microns, in meter
        phys_state%nci = 80
     endif
+    phys_state%tke = 10.0 !J kg-1
+    phys_state%tke2 = 42.0 !J kg-1
 
   end subroutine init_data
 
@@ -47,7 +52,12 @@ contains
     real(kind_phys), parameter :: effri_expected = 7.5E-5 ! 75 microns, in meter
     real(kind_phys), parameter :: effrs_expected = 5.1E-4 ! 510 microns, in meter
     real(kind_phys), parameter :: scalar_expected = 2.0E3 ! 2 km, in meter
+    real(kind_phys), parameter :: tke_expected = 10.0     ! 10 J kg-1
     real(kind_phys), parameter :: tolerance = 1.0E-6      ! used as scaling factor for expected value
+    real(kind_phys), parameter :: sfc_up_sw_expected = 100.   ! W/m2
+    real(kind_phys), parameter :: sfc_down_sw_expected = 400. ! W/m2
+    real(kind_phys), parameter :: sfc_up_lw_expected = 300.   ! W/m2
+    real(kind_phys), parameter :: sfc_down_lw_expected = 50.  ! W/m2
 
     compare_data = .true.
 
@@ -81,6 +91,36 @@ contains
         compare_data = .false.
     end if
 
+    if (abs(  phys_state%tke - tke_expected) > tolerance*tke_expected) then
+        write(6, '(a,e16.7,a,e16.7)') 'Error: max diff of            tke from expected value exceeds tolerance: ', &
+                                      abs(  phys_state%tke - tke_expected), ' > ', tolerance*tke_expected
+        compare_data = .false.
+    end if
+
+    if (maxval(abs(  phys_state%fluxSW%sfc_up_sw - sfc_up_sw_expected)) > tolerance*sfc_up_sw_expected) then
+        write(6, '(a,e16.7,a,e16.7)') 'Error: max diff of            sfc_up_sw from expected value exceeds tolerance: ', &
+                                      abs(  phys_state%fluxSW%sfc_up_sw - sfc_up_sw_expected), ' > ', tolerance*sfc_up_sw_expected
+        compare_data = .false.
+     end if
+     
+    if (maxval(abs(  phys_state%fluxSW%sfc_down_sw - sfc_down_sw_expected)) > tolerance*sfc_down_sw_expected) then
+	write(6, '(a,e16.7,a,e16.7)') 'Error: max diff of            sfc_down_sw from expected value exceeds tolerance: ', &
+                                      abs(  phys_state%fluxSW%sfc_down_sw - sfc_down_sw_expected), ' > ', tolerance*sfc_down_sw_expected
+        compare_data = .false.
+     end if
+
+    if (maxval(abs(  phys_state%fluxLW%sfc_up_lw - sfc_up_lw_expected)) > tolerance*sfc_up_lw_expected) then
+        write(6, '(a,e16.7,a,e16.7)') 'Error: max diff of            sfc_up_lw from expected value exceeds tolerance: ', &
+                                      abs(  phys_state%fluxLW%sfc_up_lw - sfc_up_lw_expected), ' > ', tolerance*sfc_up_lw_expected
+        compare_data = .false.
+     end if
+
+    if (maxval(abs(  phys_state%fluxLW%sfc_down_lw - sfc_down_lw_expected)) > tolerance*sfc_down_lw_expected) then
+        write(6, '(a,e16.7,a,e16.7)') 'Error: max diff of            sfc_down_lw from expected value exceeds tolerance: ', &
+                                      abs(  phys_state%fluxLW%sfc_down_lw - sfc_down_lw_expected), ' > ', tolerance*sfc_down_lw_expected
+        compare_data = .false.
+     end if     
+     
   end function compare_data
 
 end module test_host_mod
