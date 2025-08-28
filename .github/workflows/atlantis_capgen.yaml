@@ -44,7 +44,7 @@ jobs:
         module use ${PWD}/modulefiles
         module load atlantis/llvm-20.1.5
         BUILD_DIR=./build \
-        PYTHONPATH=test/:scripts/ \
+        PYTHONPATH=${PWD}/test:${PWD}/scripts:${PYTHONPATH} \
             pytest \
               test/capgen_test/capgen_test_reports.py \
               test/advection_test/advection_test_reports.py \
