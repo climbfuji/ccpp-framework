@@ -16,7 +16,8 @@ _UNITLESS_REGEX                = "1"
 _NON_LEADING_ZERO_NUM          = "[1-9]\d*"
 _CHAR_WITH_UNDERSCORE          = "([a-zA-Z]+_[a-zA-Z]+)+"
 _NEGATIVE_NON_LEADING_ZERO_NUM = f"[-]{_NON_LEADING_ZERO_NUM}"
-_UNIT_EXPONENT                 = f"({_NEGATIVE_NON_LEADING_ZERO_NUM}|{_NON_LEADING_ZERO_NUM})"
+_POSITIVE_NON_LEADING_ZERO_NUM = f"[+]{_NON_LEADING_ZERO_NUM}"
+_UNIT_EXPONENT                 = f"({_NEGATIVE_NON_LEADING_ZERO_NUM}|{_POSITIVE_NON_LEADING_ZERO_NUM}|{_NON_LEADING_ZERO_NUM})"
 _UNIT_REGEX                    = f"[a-zA-Z]+{_UNIT_EXPONENT}?"
 _UNITS_REGEX                   = f"^({_CHAR_WITH_UNDERSCORE}|{_UNIT_REGEX}(\s{_UNIT_REGEX})*|{_UNITLESS_REGEX})$"
 _UNITS_RE                      = re.compile(_UNITS_REGEX)
@@ -29,6 +30,10 @@ def check_units(test_val, prop_dict, error):
     'm s-1'
     >>> check_units('kg m-3', None, True)
     'kg m-3'
+    >>> check_units('m2 s-2', None, True)
+    'm2 s-2'
+    >>> check_units('m+2 s-2', None, True)
+    'm+2 s-2'
     >>> check_units('1', None, True)
     '1'
     >>> check_units('', None, False)
@@ -96,7 +101,13 @@ def check_dimensions(test_val, prop_dict, error, max_len=0):
     >>> check_dimensions("hi_mom", None, True) #doctest: +IGNORE_EXCEPTION_DETAIL
     Traceback (most recent call last):
     CCPPError: 'hi_mom' is invalid; not a list
+    >>> check_dimensions(["1:dim1", "dim2name"], None, True) #doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+    CCPPError: '1:dim1 is an invalid dimension name; integer dimension indices not supported
+    >>> check_dimensions(["ccpp_constant_one:1", "dim2name"], None, True)
+    ['ccpp_constant_one:1', 'dim2name']
     """
+    info_msg = None
     if not isinstance(test_val, list):
         if error:
             raise CCPPError("'{}' is invalid; not a list".format(test_val))
@@ -118,10 +129,24 @@ def check_dimensions(test_val, prop_dict, error, max_len=0):
             # end if
             # Check possible dim styles (a, a:b, a:, :b, :, ::, a:b:c, a::c)
             tdims = [x.strip() for x in isplit if len(x) > 0]
+            starts_at_one = False
+            if len(tdims) > 0 and tdims[0] == 'ccpp_constant_one':
+                starts_at_one = True
+            # end if
+            is_int = False
             for tdim in tdims:
                 # Check numeric value first
                 try:
-                    valid = isinstance(int(tdim), int)
+                    is_int = isinstance(int(tdim), int)
+                    # Allow integer dimensions, but not indices
+                    if is_int:
+                        valid = starts_at_one or len(tdims) == 1
+                        if not valid:
+                            info_msg = 'integer dimension indices not supported'
+                        # end if
+                    else:
+                        valid = False
+                    # end if
                 except ValueError as ve:
                     # Not an integer, try a Fortran ID
                     valid = check_fortran_id(tdim, None,
@@ -142,8 +167,12 @@ def check_dimensions(test_val, prop_dict, error, max_len=0):
                 # End try
                 if not valid:
                     if error:
-                        errmsg = "'{}' is an invalid dimension name"
-                        raise CCPPError(errmsg.format(item))
+                        if info_msg:
+                            errmsg = f"'{item}' is an invalid dimension name; {info_msg}"
+                        else:
+                            errmsg = f"'{item}' is an invalid dimension name"
+                        # end if
+                        raise CCPPError(errmsg)
                     else:
                         test_val = None
                     # end if
@@ -229,7 +258,7 @@ FORTRAN_INTRINSIC_TYPES = ["integer", "real", "logical", "complex",
 FORTRAN_DP_RE = re.compile(r"(?i)double\s*precision")
 FORTRAN_TYPE_RE = re.compile(r"(?i)type\s*\(\s*("+FORTRAN_ID+r")\s*\)")
 
-_REGISTERED_FORTRAN_DDT_NAMES = []
+_REGISTERED_FORTRAN_DDT_NAMES = ["ccpp_constituent_prop_ptr_t"]
 
 ########################################################################
 

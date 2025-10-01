@@ -1,6 +1,10 @@
 module test_host_data
 
-  use ccpp_kinds, only: kind_phys
+  use ccpp_kinds,  only: kind_phys
+  use mod_rad_ddt, only: ty_rad_lw, ty_rad_sw
+
+   implicit none
+   private
 
   !> \section arg_table_physics_state  Argument Table
   !! \htmlinclude arg_table_physics_state.html
@@ -13,9 +17,20 @@ module test_host_data
           ncg,                                       & ! number concentration of cloud graupel
           nci                                          ! number concentration of cloud ice
      real(kind_phys) :: scalar_var
+     type(ty_rad_lw), dimension(:), allocatable ::   &
+          fluxLW                                       ! Longwave radiation fluxes
+     type(ty_rad_sw) ::   &
+          fluxSW                                       ! Shortwave radiation fluxes
+     real(kind_phys) :: scalar_varA
+     real(kind_phys) :: scalar_varB
+     real(kind_phys) :: tke, tke2
+     integer :: scalar_varC
+     integer :: scheme_order
+     integer :: num_subcycles
   end type physics_state
 
-  public allocate_physics_state
+  public :: physics_state
+  public :: allocate_physics_state
 
 contains
 
@@ -61,6 +76,26 @@ contains
        end if
        allocate(state%nci(cols, levels))
     endif
+
+    if (allocated(state%fluxLW)) then
+       deallocate(state%fluxLW)
+    end if
+    allocate(state%fluxLW(cols))
+
+    if (associated(state%fluxSW%sfc_up_sw)) then
+       nullify(state%fluxSW%sfc_up_sw)
+    end if
+    allocate(state%fluxSW%sfc_up_sw(cols))
+
+    if (associated(state%fluxSW%sfc_down_sw)) then
+       nullify(state%fluxSW%sfc_down_sw)
+    end if
+    allocate(state%fluxSW%sfc_down_sw(cols))
+
+    ! Initialize scheme counter.
+    state%scheme_order = 1
+    ! Initialize subcycle counter.
+    state%num_subcycles = 3
 
   end subroutine allocate_physics_state
 

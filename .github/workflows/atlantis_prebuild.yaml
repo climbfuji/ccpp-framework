@@ -43,16 +43,17 @@ jobs:
         cd test_prebuild
         pytest
         deactivate
-    - name: ccpp-prebuild blocked data tests
-      run: |
-        module use ${PWD}/modulefiles
-        module load atlantis/llvm-20.1.5
-        cd test_prebuild/test_blocked_data
-        python3 ../../scripts/ccpp_prebuild.py --config=ccpp_prebuild_config.py --builddir=build
-        cd build
-        cmake ..
-        make
-        ./test_blocked_data.x
+    # No longer possible because of https://github.com/NCAR/ccpp-framework/pull/659
+    #- name: ccpp-prebuild blocked data tests
+    #  run: |
+    #    module use ${PWD}/modulefiles
+    #    module load atlantis/llvm-20.1.5
+    #    cd test_prebuild/test_blocked_data
+    #    python3 ../../scripts/ccpp_prebuild.py --config=ccpp_prebuild_config.py --builddir=build
+    #    cd build
+    #    cmake ..
+    #    make
+    #    ./test_blocked_data.x
     - name: ccpp-prebuild chunked data tests
       run: |
         module use ${PWD}/modulefiles
