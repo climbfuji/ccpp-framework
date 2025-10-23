@@ -1853,10 +1853,13 @@ end module {module}
                     subroutine_call = '''
 {actions_before}
 
+      write(0,"(a,i0,a,i0,a)") "Calling {suite_name}/{group_name}/{subroutine_name} as thread ", {thrdnmb}, "/", {thrdcnt}, " ..."
       call {subroutine_name}({args})
 
 {actions_after}
-'''.format(subroutine_name=subroutine_name, args=args, actions_before=actions_before.rstrip('\n'), actions_after=actions_after.rstrip('\n'))
+'''.format(subroutine_name=subroutine_name, args=args, actions_before=actions_before.rstrip('\n'), actions_after=actions_after.rstrip('\n'),
+           suite_name=self._suite, group_name=self._name, thrdnmb=CCPP_INTERNAL_VARIABLES[CCPP_THREAD_NUMBER],
+           thrdcnt=CCPP_INTERNAL_VARIABLES[CCPP_THREAD_COUNT])
                     error_check = '''if ({target_name_flag}/=0) then
         {target_name_msg} = "An error occured in {subroutine_name}: " // trim({target_name_msg})
         ierr={target_name_flag}
