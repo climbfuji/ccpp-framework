@@ -7,7 +7,10 @@ into a Fortran conditional (used in an if statement), expressed in local names.
 
 import re
 
-FORTRAN_CONDITIONAL_REGEX_WORDS = [' ', '(', ')', '==', '/=', '<=', '>=', '<', '>', '.eqv.', '.neqv.',
+fortran_conditional_regex_tokens = ['==', '/=', '<=', '>=', '<', '>', '.eqv.', '.neqv.',
                                    '.true.', '.false.', '.lt.', '.le.', '.eq.', '.ge.', '.gt.', '.ne.',
                                    '.not.', '.and.', '.or.', '.xor.']
-FORTRAN_CONDITIONAL_REGEX = re.compile(r"[\w']+|" + "|".join([word.replace('(','\(').replace(')', '\)') for word in FORTRAN_CONDITIONAL_REGEX_WORDS]))
+
+FORTRAN_CONDITIONAL_REGEX_WORDS = [' ', '[(]', '[)]'] + fortran_conditional_regex_tokens
+
+FORTRAN_CONDITIONAL_REGEX = re.compile(r"[\w']+|[ ()]|" + "|".join([word for word in FORTRAN_CONDITIONAL_REGEX_WORDS]))

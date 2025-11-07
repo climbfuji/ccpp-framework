@@ -38,10 +38,14 @@ class XMLToolsInternalError(ValueError):
         super().__init__(message)
 
 ###############################################################################
-def call_command(commands, logger, silent=False):
+def call_command(commands, logger, silent=False, return_proc=False):
 ###############################################################################
     """
-    Try a command line and return the output on success (None on failure)
+    Try a command line and return True only for a zero return code
+    If silent==True, do not log output and simply return False on an exception
+    If return_proc==True, return the CompletedProcess instance instead of a boolean
+    If silent==True and return_proc==True, return None in the case of an exception
+
     >>> _LOGGER = init_log('xml_tools')
     >>> set_log_to_null(_LOGGER)
     >>> call_command(['ls', 'really__improbable_fffilename.foo'], _LOGGER) #doctest: +IGNORE_EXCEPTION_DETAIL
@@ -50,6 +54,8 @@ def call_command(commands, logger, silent=False):
     [Errno 2] No such file or directory
     >>> call_command(['ls', 'really__improbable_fffilename.foo'], _LOGGER, silent=True)
     False
+    >>> call_command(['ls'], _LOGGER, silent=True, return_proc=True).returncode
+    0
     >>> call_command(['ls'], _LOGGER)
     True
     >>> try:
@@ -75,11 +81,22 @@ def call_command(commands, logger, silent=False):
                                 capture_output=True)
         if not silent:
             logger.debug(cproc.stdout)
+            if cproc.stderr:
+                logger.warning(cproc.stderr)
+            # end if
         # end if
-        result = cproc.returncode == 0
+        if return_proc:
+            result = cproc
+        else:
+            result = cproc.returncode == 0
+        # end if
     except (OSError, CCPPError, subprocess.CalledProcessError) as err:
         if silent:
-            result = False
+            if return_proc:
+                result = None
+            else:
+                result = False
+            # end if
         else:
             cmd = ' '.join(commands)
             outstr = f"Execution of '{cmd}' failed with code: {err.returncode}\n"
@@ -213,7 +230,15 @@ def validate_xml_file(filename, schema_root, version, logger,
         logger.debug("Checking file {} against schema {}".format(filename,
                                                                  schema_file))
         cmd = [_XMLLINT, '--noout', '--schema', schema_file, filename]
-        result = call_command(cmd, logger)
+        result = call_command(cmd, logger, return_proc=True)
+        if result.returncode == 0:
+            ## We got a pass return code but some versions of xmllint do not
+            ## correctly return an error code on non-validation so double check
+            ## the result
+            result = b'validates' in result.stdout or b'validates' in result.stderr
+        else:
+            result = True
+        # end if
         return result
     # end if
     lmsg = "xmllint not found, could not validate file {}"
@@ -411,11 +436,14 @@ def replace_nested_suite(element, nested_suite, default_path, logger):
     suite_name = nested_suite.attrib.get("name")
     group_name = nested_suite.attrib.get("group")
     file = nested_suite.attrib.get("file")
+    if not file:
+        raise CCPPError("file attribute required for nested_suite tag")
+    # end if
     if not os.path.isabs(file):
         file = os.path.join(default_path, file)
     referenced_suite = load_suite_by_name(suite_name, group_name, file,
                                           logger=logger)
-    imported_content = [ET.fromstring(ET.tostring(child)) 
+    imported_content = [ET.fromstring(ET.tostring(child))
                         for child in referenced_suite]
     # Swap nested suite with imported content
     for item in imported_content:
@@ -581,7 +609,7 @@ def expand_nested_suites(suite, default_path, logger=None):
             return
     raise CCPPError("Exceeded number of iterations while expanding nested suites:" + \
                     "check for inifite recursion or adjust limit max_iterations")
-                    
+
 ###############################################################################
 def write_xml_file(root, file_path, logger=None):
 ###############################################################################
@@ -598,7 +626,7 @@ def write_xml_file(root, file_path, logger=None):
 
     # Convert ElementTree to a byte string
     byte_string = ET.tostring(root, 'us-ascii')
-    
+
     # Parse string using minidom for pretty printing
     reparsed = xml.dom.minidom.parseString(byte_string)
 
