@@ -38,6 +38,69 @@ class XMLToolsInternalError(ValueError):
         super().__init__(message)
 
 ###############################################################################
+def suite_name_str(suite, group=None, filename=None, verbose=False):
+###############################################################################
+    """Construct a string that describes a suite / group combination.
+    An optional filename argument can be added to the string.
+
+    >>> name_str("sname", "gname")
+    'sname:gname'
+    >>> name_str("sname", "gname", filename="fname")
+    'sname:gname:fname'
+    """
+    names = [suite]
+    if not group:
+        group = "no_group"
+    # end if
+    if verbose:
+        names.append(f"group {group}")
+        if filename:
+            names.append(f"file {filename}")
+        # end if
+        jstr = ", "
+    else:
+        names.append(group)
+        if filename:
+            names.append(filename)
+        # end if
+        jstr = ":"
+    # end if
+    return jstr.join(names)
+
+###############################################################################
+def element_gather_nested(element, parent, nest_chain):
+###############################################################################
+    """Find all nested suites in <element> and add a work item for each one.
+
+    Parameters:
+        element (xml.etree.ElementTree.Element): A group or nested_suite element
+        parent (xml.etree.ElementTree.Element): The parent element (group or suite) of this element
+        nest_chain (list): The dependency chain that led to this nested suite
+
+    Returns:
+        list: A list of expansion work items. A work item is a list that contains:
+            - the nested suite to process
+            - the suite or group that contains the nested suite
+            - the chain of suite / group combinations that led to this work item.
+    """
+
+    work_items = []
+    if element.tag == 'group':
+        nested_suites = element.findall("nested_suite")
+        work_parent = element
+    elif element.tag == 'nested_suite':
+        nested_suites = [element]
+        work_parent = parent
+    else:
+        # Just ignore items such as schemes and subcycles
+        nested_suites = []
+    # end if
+    for nested in nested_suites:
+        work_items.append([nested, work_parent, nest_chain])
+    # end for
+    return work_items
+
+###############################################################################
 def call_command(commands, logger, silent=False):
 ###############################################################################
     """
@@ -233,7 +296,7 @@ def read_xml_file(filename, logger=None):
         logger (logging.Logger, optional): Logger for warnings/errors.
 
     Returns:
-        tree (xml.etree.ElementTreet): The element tree from the input file.
+        tree (xml.etree.ElementTree): The element tree from the input file.
         root (xml.etree.ElementTree.Element): The root element of tree.
 
     Raises:
@@ -328,7 +391,7 @@ def load_suite_by_name(suite_name, group_name, file, logger=None):
     raise CCPPError(emsg)
 
 ###############################################################################
-def replace_nested_suite(element, nested_suite, default_path, logger):
+def replace_nested_suite(element, nested_suite, nest_chain, default_path, logger):
 ###############################################################################
     """
     Replace a <nested_suite> tag with the actual suite or group it references.
@@ -340,11 +403,12 @@ def replace_nested_suite(element, nested_suite, default_path, logger):
     Parameters:
         element (xml.etree.ElementTree.Element): The parent element containing the nested suite.
         nested_suite (xml.etree.ElementTree.Element): The <nested_suite> element to be replaced.
+        nest_chain(list): The list of suite / group combinations leading to <nested_suite>
         default_path (str): The default path to look for nested SDFs if file is not a absolute path.
         logger (logging.Logger or None): Logger to record debug information.
 
     Returns:
-        str: The name of the suite that was replaced
+        list: A list of expansion work items contained in this suite
 
     Example:
         >>> import tempfile
@@ -369,7 +433,7 @@ def replace_nested_suite(element, nested_suite, default_path, logger):
         ... '''
         >>> top_suite = ET.fromstring(xml)
         >>> nested = top_suite.find("nested_suite")
-        >>> replace_nested_suite(top_suite, nested, tmpdir.name, logger)
+        >>> replace_nested_suite(top_suite, nested, ["depend"], tmpdir.name, logger)
         'my_suite'
         >>> [child.tag for child in top_suite]
         ['group']
@@ -386,7 +450,7 @@ def replace_nested_suite(element, nested_suite, default_path, logger):
         >>> top_suite = ET.fromstring(xml)
         >>> top_group = top_suite.find("group")
         >>> nested = top_group.find("nested_suite")
-        >>> replace_nested_suite(top_group, nested, tmpdir.name, logger)
+        >>> replace_nested_suite(top_group, nested, ["depend"], tmpdir.name, logger)
         'my_suite'
         >>> [child.tag for child in top_suite]
         ['group']
@@ -400,7 +464,7 @@ def replace_nested_suite(element, nested_suite, default_path, logger):
         ... '''
         >>> top_suite = ET.fromstring(xml)
         >>> nested = top_suite.find("nested_suite")
-        >>> replace_nested_suite(top_suite, nested, tmpdir.name, logger)
+        >>> replace_nested_suite(top_suite, nested, ["depend"], tmpdir.name, logger)
         'my_suite'
         >>> [child.tag for child in top_suite]
         ['group']
@@ -411,20 +475,23 @@ def replace_nested_suite(element, nested_suite, default_path, logger):
     suite_name = nested_suite.attrib.get("name")
     group_name = nested_suite.attrib.get("group")
     file = nested_suite.attrib.get("file")
+    new_parent = suite_name_str(suite_name, group=group_name, filename=file)
+    if new_parent in nest_chain:
+        nest_chain.append(new_parent)
+        depj = " ==> "
+        raise CCPPError(f"Circular dependency in nested suites: {depj.join(nest_chain)}")
+    # end if
+    nest_chain.append(new_parent)
     if not os.path.isabs(file):
-        file = os.path.join(default_path, file)
+        file = os.path.abspath(os.path.join(default_path, file))
+    # end if
     referenced_suite = load_suite_by_name(suite_name, group_name, file,
                                           logger=logger)
-    imported_content = [ET.fromstring(ET.tostring(child)) 
+    imported_content = [ET.fromstring(ET.tostring(child))
                         for child in referenced_suite]
+    work_items = []
     # Swap nested suite with imported content
     for item in imported_content:
-        # If the imported content comes from a separate file and has
-        # nested suites that are within that separate file, then we
-        # need to inject the file attribute here.
-        if item.tag == "nested_suite":
-            if file and not item.attrib.get("file"):
-                item.set("file", file)
         # If we are inserting a nested suite at the suite level (element.tag is suite),
         # but we only want one group (group_name is not none), then we need to wrap
         # the item in a group element. If on the other hand we insert an entire suite
@@ -433,17 +500,28 @@ def replace_nested_suite(element, nested_suite, default_path, logger):
         if element.tag == 'suite' and group_name:
             item_to_insert = ET.Element("group", attrib={"name": group_name})
             item_to_insert.append(item)
+            new_parent = item_to_insert
         else:
             item_to_insert = item
+            new_parent = element
+        # end if
+        work_items.extend(element_gather_nested(item, new_parent, nest_chain))
+# XXgoldyXX: v debug only
+        if nested_suite not in list(element):
+            nsname = nested_suite.attrib.get("name")
+            elname = element.attrib.get("name")
+            raise XMLToolsInternalError(f"Trying to insert {nested_suite.tag}, {nsname} in {element.tag}, {elname}")
+# XXgoldyXX: ^ debug only
         element.insert(list(element).index(nested_suite), item_to_insert)
+    # end for
     element.remove(nested_suite)
     if logger:
         msg = f"Expanded nested suite '{suite_name}'" \
             + (f", group '{group_name}'," if group_name else "") \
             + (f" in file '{file}'" if file else "")
         logger.debug(msg.rstrip(','))
-    # Return the name of the suite that we just replaced
-    return suite_name
+    # Return the list of new work items contained in this suite or group
+    return work_items
 
 ###############################################################################
 def expand_nested_suites(suite, default_path, logger=None):
@@ -553,38 +631,25 @@ def expand_nested_suites(suite, default_path, logger=None):
         CCPPError: Exceeded number of iterations while expanding nested suites
         >>> tmpdir.cleanup()
     """
-    # To avoid infinite recursion, we simply count the number
-    # of iterations and stop at a certain limit. If someone is
-    # smart enough to come up with nested suite constructs that
-    # require more iterations, than he/she should be able to
-    # track down this variable and adjust it!
-    max_iterations = 10
-    # Collect the names of the expanded suites
-    suite_names = []
-    # Iteratively expand nested suites until they are all gone
-    keep_expanding = True
-    for num_iterations in range(max_iterations):
-        keep_expanding = False
-        # First, search all groups for nested_suite elements
-        groups = suite.findall("group")
-        for group in groups:
-            nested_suites = group.findall("nested_suite")
-            for nested in nested_suites:
-                suite_names.append(replace_nested_suite(group, nested, default_path, logger))
-                # Trigger another pass over the root element
-                keep_expanding = True
-        # Second, search all suites for nested_suite elements
-        nested_suites = suite.findall("nested_suite")
-        for nested in nested_suites:
-            suite_names.append(replace_nested_suite(suite, nested, default_path, logger))
-            # Trigger another pass over the root element
-            keep_expanding = True
-        if not keep_expanding:
-            return
-    raise CCPPError("Exceeded number of iterations while expanding nested suites:" + \
-                    "check for inifite recursion or adjust limit max_iterations." + \
-                    f"Suites expanded so far: {suite_names}")
-                    
+    # To avoid infinite recursion, keep track of the suites processed and flag
+    # an error if a repeat is found.
+    # Each item in the worklist is a nested suite to process, the suite or group
+    # that contains the nested suite, and the chain of
+    # suite / group combinations that led to this work item.
+    worklist = []
+    suite_name = suite_name_str(suite.attrib.get("name"))
+    for item in suite:
+        worklist.extend(element_gather_nested(item, suite, []))
+    # end for
+    while worklist:
+        # Process each item in the worklist
+        work_item = worklist.pop(0)
+        nested = work_item[0]
+        element = work_item[1]
+        nest_chain = work_item[2]
+        worklist.extend(replace_nested_suite(element, nested, nest_chain, default_path, logger))
+    # end for
+
 ###############################################################################
 def write_xml_file(root, file_path, logger=None):
 ###############################################################################
@@ -601,7 +666,7 @@ def write_xml_file(root, file_path, logger=None):
 
     # Convert ElementTree to a byte string
     byte_string = ET.tostring(root, 'us-ascii')
-    
+
     # Parse string using minidom for pretty printing
     reparsed = xml.dom.minidom.parseString(byte_string)
 
